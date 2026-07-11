@@ -1,0 +1,77 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<title>Interview Helper</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="icon" href="data:,">
+<link rel="stylesheet" href="/app.css">
+</head>
+<body>
+<header id="topbar">
+  <span id="status-dot" class="dot idle"></span>
+  <span id="status-text">Загрузка…</span>
+  <span id="timer" title="До следующего анализа">–:––</span>
+  <button id="btn-analyze" class="btn small" disabled title="Запустить анализ вне расписания">Анализ</button>
+  <button id="btn-startstop" class="btn small primary" disabled>Старт</button>
+</header>
+
+<nav id="tabs">
+  <button data-tab="recs" class="tab active">Подсказки</button>
+  <button data-tab="topics" class="tab">Темы <span id="cov-counter"></span></button>
+  <button data-tab="transcript" class="tab">Транскрипт</button>
+  <button data-tab="setup" class="tab">Настройка</button>
+</nav>
+
+<main>
+  <section id="tab-recs" class="pane active">
+    <div id="recs-list" class="scroll"></div>
+  </section>
+
+  <section id="tab-topics" class="pane">
+    <div id="topics-list" class="scroll"></div>
+  </section>
+
+  <section id="tab-transcript" class="pane">
+    <div id="transcript-list" class="scroll"></div>
+  </section>
+
+  <section id="tab-setup" class="pane">
+    <div class="scroll setup">
+      <div class="row">
+        <span class="lbl">LLM</span>
+        <span id="llm-status" class="grow">проверка…</span>
+        <button id="btn-llm-refresh" class="btn tiny" title="Проверить снова">⟳</button>
+      </div>
+
+      <div class="row">
+        <span class="lbl">Микрофон → интервьюер</span>
+        <span class="grow"></span>
+        <button id="btn-dev-refresh" class="btn tiny" title="Обновить список устройств">⟳</button>
+      </div>
+      <select id="sel-mic"></select>
+      <div class="row"><span class="lbl">Системный звук (BlackHole / VB-Cable) → респондент</span></div>
+      <select id="sel-sys"></select>
+
+      <div class="row"><span class="lbl">Гайд исследования</span><span id="guide-badge" class="grow dim"></span></div>
+      <div id="guide-editor">
+        <textarea id="guide-text" rows="7"
+          placeholder="Вставьте текст гайда в свободной форме: секции и вопросы…"></textarea>
+        <button id="btn-parse" class="btn">Распарсить гайд</button>
+      </div>
+      <div id="guide-preview" class="hidden">
+        <div id="guide-tree"></div>
+        <div class="btnrow">
+          <button id="btn-confirm-guide" class="btn primary">Использовать эту структуру</button>
+          <button id="btn-edit-guide" class="btn">← Править текст</button>
+        </div>
+      </div>
+
+      <div id="setup-msg"></div>
+    </div>
+  </section>
+</main>
+
+<script src="/app.js"></script>
+</body>
+</html>
