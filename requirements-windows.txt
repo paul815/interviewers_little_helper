@@ -1,0 +1,5 @@
+-r requirements-common.txt
+# CUDA-библиотеки для faster-whisper (CTranslate2): достаточно pip-пакетов,
+# полный CUDA Toolkit не нужен. Приложение само добавляет их DLL в путь поиска.
+nvidia-cublas-cu12 ; sys_platform == 'win32'
+nvidia-cudnn-cu12>=9 ; sys_platform == 'win32'
