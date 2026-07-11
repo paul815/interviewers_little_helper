@@ -9,6 +9,7 @@ import threading
 import time
 from datetime import datetime
 
+from .. import __version__
 from ..config import AppConfig
 from ..coverage.engine import CoverageEngine
 from ..domain import AudioChunk, Speaker
@@ -235,7 +236,7 @@ class AppController:
         rt = self.rt
         snap: dict = {
             "state": self.state,
-            "app_version": __import__("app").__version__,
+            "app_version": __version__,
             "interval_s": self.cfg.analysis.interval_s,
             "llm_model": self.cfg.llm.model,
             "session_id": None,

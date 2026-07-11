@@ -78,7 +78,13 @@ class CoverageEngine:
                 manual = await self._wait_for_trigger(stop_event, manual_event)
                 if stop_event.is_set():
                     break
-                await self.analyze(manual=manual)
+                try:
+                    await self.analyze(manual=manual)
+                except Exception:
+                    # Планировщик должен пережить любой сбой одного цикла.
+                    log.exception("Непредвиденная ошибка цикла анализа")
+                    await self.notify("error", {"message": "Внутренняя ошибка анализа — подробности в logs/app.log"})
+                    await self.notify("analysis", {"phase": "failed"})
         except asyncio.CancelledError:
             log.info("Планировщик анализа отменён")
             raise
@@ -125,44 +131,45 @@ class CoverageEngine:
                 return
 
             self.analyzing = True
-            await self.notify(
-                "analysis",
-                {"phase": "started", "manual": manual, "new_segments": len(delta)},
-            )
-            started = time.monotonic()
-            log_entry: dict = {
-                "iteration": self.state.analysis_iteration + 1,
-                "ts": datetime.now().astimezone().isoformat(),
-                "manual": manual,
-                "delta_segments": len(delta),
-            }
             try:
-                user = prompts.user_prompt(self.state, self.guide, delta, self.llm_cfg.max_delta_chars)
-                parsed, meta = await self.llm.chat_json(self._system, user, self._schema)
-                log_entry.update(
-                    duration_s=round(meta.duration_s, 1),
-                    prompt_chars=meta.prompt_chars,
-                    eval_count=meta.eval_count,
-                    prompt_eval_count=meta.prompt_eval_count,
-                    retried=meta.retried,
-                    raw_response=meta.raw_response[:20000],
+                await self.notify(
+                    "analysis",
+                    {"phase": "started", "manual": manual, "new_segments": len(delta)},
                 )
-            except OllamaError as e:
-                # Курсор не двигаем: эта дельта попадёт в следующий цикл.
-                self.analyzing = False
-                log_entry["error"] = str(e)
-                self._persist_log(log_entry)
-                log.error("Цикл анализа не удался: %s", e)
-                await self.notify("error", {"message": f"Анализ не удался: {e}"})
-                await self.notify("analysis", {"phase": "failed"})
-                return
+                started = time.monotonic()
+                log_entry: dict = {
+                    "iteration": self.state.analysis_iteration + 1,
+                    "ts": datetime.now().astimezone().isoformat(),
+                    "manual": manual,
+                    "delta_segments": len(delta),
+                }
+                try:
+                    user = prompts.user_prompt(self.state, self.guide, delta, self.llm_cfg.max_delta_chars)
+                    parsed, meta = await self.llm.chat_json(self._system, user, self._schema)
+                    log_entry.update(
+                        duration_s=round(meta.duration_s, 1),
+                        prompt_chars=meta.prompt_chars,
+                        eval_count=meta.eval_count,
+                        prompt_eval_count=meta.prompt_eval_count,
+                        retried=meta.retried,
+                        raw_response=meta.raw_response[:20000],
+                    )
+                except OllamaError as e:
+                    # Курсор не двигаем: эта дельта попадёт в следующий цикл.
+                    log_entry["error"] = str(e)
+                    self._persist_log(log_entry)
+                    log.error("Цикл анализа не удался: %s", e)
+                    await self.notify("error", {"message": f"Анализ не удался: {e}"})
+                    await self.notify("analysis", {"phase": "failed"})
+                    return
 
-            response = self._validate(parsed)
-            applied = self._apply_response(response)
-            self._cursor = next_cursor
-            self.state.analysis_iteration += 1
-            self.state.updated_at = datetime.now().astimezone().isoformat()
-            self.analyzing = False
+                response = self._validate(parsed)
+                applied = self._apply_response(response)
+                self._cursor = next_cursor
+                self.state.analysis_iteration += 1
+                self.state.updated_at = datetime.now().astimezone().isoformat()
+            finally:
+                self.analyzing = False
 
             self._persist(log_entry)
             counts = self.state.counts()
