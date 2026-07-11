@@ -6,6 +6,7 @@ env/
 .pytest_cache/
 .mypy_cache/
 sessions/
+guides/
 logs/
 config.json
 *.log

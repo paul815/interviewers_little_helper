@@ -12,6 +12,7 @@
   <span id="status-dot" class="dot idle"></span>
   <span id="status-text">Загрузка…</span>
   <span id="timer" title="До следующего анализа">–:––</span>
+  <button id="btn-flag" class="btn small hidden" title="Отметить момент (клавиша F)">🚩</button>
   <button id="btn-analyze" class="btn small" disabled title="Запустить анализ вне расписания">Анализ</button>
   <button id="btn-startstop" class="btn small primary" disabled>Старт</button>
 </header>
@@ -25,7 +26,11 @@
 
 <main>
   <section id="tab-recs" class="pane active">
-    <div id="recs-list" class="scroll"></div>
+    <div class="scroll">
+      <div id="pace-line" class="pace hidden"></div>
+      <div id="probes-list"></div>
+      <div id="recs-list"></div>
+    </div>
   </section>
 
   <section id="tab-topics" class="pane">
@@ -50,12 +55,29 @@
         <button id="btn-dev-refresh" class="btn tiny" title="Обновить список устройств">⟳</button>
       </div>
       <select id="sel-mic"></select>
+      <div class="vu"><div id="vu-mic" class="vu-fill"></div></div>
+
       <div class="row"><span class="lbl">Системный звук (BlackHole / VB-Cable) → респондент</span></div>
       <select id="sel-sys"></select>
+      <div class="vu"><div id="vu-sys" class="vu-fill"></div></div>
+      <div id="vu-hint" class="hint">Скажите фразу и включите звук в Zoom — обе полоски должны дёргаться.</div>
+
+      <div class="row">
+        <span class="lbl">Длительность интервью</span>
+        <span class="grow"></span>
+        <input id="duration" type="number" min="10" max="240" step="5" value="60"> <span class="dim">мин</span>
+      </div>
+
+      <div class="row"><span class="lbl">Библиотека гайдов</span></div>
+      <div class="librow">
+        <select id="sel-guide-lib"><option value="">— пусто —</option></select>
+        <button id="btn-lib-load" class="btn tiny">Загрузить</button>
+        <button id="btn-lib-del" class="btn tiny" title="Удалить выбранный">✕</button>
+      </div>
 
       <div class="row"><span class="lbl">Гайд исследования</span><span id="guide-badge" class="grow dim"></span></div>
       <div id="guide-editor">
-        <textarea id="guide-text" rows="7"
+        <textarea id="guide-text" rows="6"
           placeholder="Вставьте текст гайда в свободной форме: секции и вопросы…"></textarea>
         <button id="btn-parse" class="btn">Распарсить гайд</button>
       </div>

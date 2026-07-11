@@ -23,10 +23,25 @@ class GuideParseRequest(BaseModel):
     text: str
 
 
+class GuideSaveRequest(BaseModel):
+    guide: dict
+    source_text: str = ""
+
+
 class SessionStartRequest(BaseModel):
     mic_index: int
     system_index: int
     guide: dict
+    duration_min: int | None = None
+
+
+class MonitorRequest(BaseModel):
+    mic_index: int | None = None
+    system_index: int | None = None
+
+
+class FlagRequest(BaseModel):
+    note: str = ""
 
 
 def create_app(cfg: AppConfig) -> FastAPI:
@@ -37,6 +52,7 @@ def create_app(cfg: AppConfig) -> FastAPI:
     async def lifespan(app: FastAPI):
         hub.set_loop(asyncio.get_running_loop())
         yield
+        await controller.stop_monitor()
         if controller.state in ("running", "starting"):
             try:
                 await controller.stop_session()
@@ -89,9 +105,62 @@ def create_app(cfg: AppConfig) -> FastAPI:
         guide = await controller.parse_guide(req.text)
         return guide.model_dump()
 
+    # ------------------------------------------------------ библиотека гайдов
+
+    @app.get("/api/guides")
+    async def guides_list():
+        return {"guides": controller.library.list()}
+
+    @app.post("/api/guides")
+    async def guides_save(req: GuideSaveRequest):
+        from ..guide.schemas import Guide
+
+        try:
+            guide = Guide.model_validate(req.guide)
+        except Exception as e:
+            raise ControllerError(f"Невалидная структура гайда: {e}") from e
+        file_id = controller.library.save(guide, req.source_text)
+        return {"file_id": file_id}
+
+    @app.get("/api/guides/{file_id}")
+    async def guides_load(file_id: str):
+        try:
+            return controller.library.load(file_id)
+        except FileNotFoundError:
+            raise ControllerError("Гайд не найден в библиотеке")
+        except (ValueError, KeyError) as e:
+            raise ControllerError(f"Не удалось загрузить гайд: {e}")
+
+    @app.delete("/api/guides/{file_id}")
+    async def guides_delete(file_id: str):
+        try:
+            controller.library.delete(file_id)
+        except ValueError as e:
+            raise ControllerError(str(e))
+        return {"ok": True}
+
+    # ------------------------------------------------------- монитор уровней
+
+    @app.post("/api/monitor/start")
+    async def monitor_start(req: MonitorRequest):
+        return await controller.start_monitor(req.mic_index, req.system_index)
+
+    @app.post("/api/monitor/stop")
+    async def monitor_stop():
+        await controller.stop_monitor()
+        return {"ok": True}
+
+    # ----------------------------------------------------------------- сессия
+
     @app.post("/api/session/start")
     async def session_start(req: SessionStartRequest):
-        return await controller.start_session(req.mic_index, req.system_index, req.guide)
+        return await controller.start_session(
+            req.mic_index, req.system_index, req.guide, req.duration_min
+        )
+
+    @app.post("/api/session/flag")
+    async def session_flag(req: FlagRequest):
+        return await controller.add_flag(req.note)
 
     @app.post("/api/session/stop")
     async def session_stop():

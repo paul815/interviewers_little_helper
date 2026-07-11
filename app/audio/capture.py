@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import logging
 import threading
+import time
 from collections import deque
 from dataclasses import dataclass
 
@@ -90,6 +91,8 @@ class ChannelCapture:
         self.ring = RingBuffer(cfg.ring_seconds, cfg.sample_rate)
         self.stats = CaptureStats()
         self.device_name = ""
+        self.level = 0.0  # затухающий пик для VU-метра, 0..1
+        self.last_sample_time = 0.0  # time.monotonic() последнего callback'а
         self._stream = None
         self._resampler = None
 
@@ -123,6 +126,7 @@ class ChannelCapture:
                 f"Не удалось открыть аудиоустройство «{self.device_name}» (#{self.device_index})"
             )
 
+        self.last_sample_time = time.monotonic()
         if actual_rate != target:
             import soxr
 
@@ -139,7 +143,11 @@ class ChannelCapture:
         # Внутри callback — только копирование в буфер, никакой тяжёлой работы.
         if status:
             self.stats.xruns += 1
+        self.last_sample_time = time.monotonic()
         mono = indata[:, 0].copy() if indata.ndim > 1 else indata.copy()
+        if len(mono):
+            peak = float(np.max(np.abs(mono)))
+            self.level = max(self.level * 0.82, min(peak, 1.0))
         if self._resampler is not None:
             mono = self._resampler.resample_chunk(mono)
         if len(mono):

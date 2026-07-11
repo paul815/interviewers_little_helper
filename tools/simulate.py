@@ -54,6 +54,9 @@ async def notify(type_: str, payload: dict) -> None:
         for r in payload["items"]:
             print(f"  [{r['urgency']}] {r.get('section_title') or ''} — {r.get('note')}")
             print(f"      → {r.get('suggested_question')}")
+        for r in payload.get("probes", []):
+            print(f"  [🔍 probe] «{r.get('quote') or ''}» — {r.get('note')}")
+            print(f"      → {r.get('suggested_question')}")
     elif type_ in ("status", "error"):
         print(f"  ({payload.get('message')})")
 
@@ -64,6 +67,8 @@ async def main() -> None:
     parser.add_argument("--transcript", type=Path, required=True)
     parser.add_argument("--batch-lines", type=int, default=12,
                         help="реплик на один цикл анализа (по умолчанию 12)")
+    parser.add_argument("--final", action="store_true",
+                        help="после всех циклов прогнать финальную сверку и показать findings")
     args = parser.parse_args()
 
     cfg = AppConfig.load()
@@ -100,6 +105,14 @@ async def main() -> None:
             t += 6.0
         print(f"\n=== Цикл {start // args.batch_lines + 1}: +{len(batch)} реплик ===")
         await engine.analyze(manual=True)
+
+    if args.final:
+        print("\n=== Финальная сверка ===")
+        await engine.final_pass()
+        for tid, items in engine.findings().items():
+            print(f"  {tid}:")
+            for f in items:
+                print(f"    - {f}")
 
     print("\nГотово.")
 

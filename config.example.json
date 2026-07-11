@@ -1,6 +1,14 @@
 {
   "server": { "host": "127.0.0.1", "port": 8756 },
-  "analysis": { "interval_s": 240, "max_recommendations": 6 },
+  "analysis": {
+    "interval_s": 240,
+    "max_recommendations": 6,
+    "max_probes": 2,
+    "reconcile_every": 4,
+    "final_sweep": true,
+    "report": true,
+    "default_duration_min": 60
+  },
   "audio": {
     "sample_rate": 16000,
     "ring_seconds": 120,
@@ -9,7 +17,8 @@
     "min_pause_s": 0.7,
     "min_speech_s": 0.3,
     "pad_s": 0.2,
-    "vad": "auto"
+    "vad": "auto",
+    "watchdog_silence_s": 12.0
   },
   "asr": {
     "backend": "auto",
@@ -29,6 +38,6 @@
     "request_timeout_s": 300,
     "max_delta_chars": 12000
   },
-  "storage": { "sessions_dir": "sessions", "save_audio_chunks": false },
+  "storage": { "sessions_dir": "sessions", "guides_dir": "guides", "save_audio_chunks": false },
   "log_level": "INFO"
 }

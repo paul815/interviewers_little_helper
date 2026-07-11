@@ -1,5 +1,13 @@
-"""Движок покрытия: running-состояние тем, 4-минутный планировщик с ручным
-запуском, вызов LLM и монотонное слияние результатов."""
+"""Движок покрытия: running-состояние тем, планировщик с ручным запуском,
+вызов LLM и монотонное слияние результатов.
+
+Три режима анализа:
+- delta      — обычный цикл: только новые реплики с прошлого анализа;
+- reconcile  — каждый N-й цикл: окно с прошлой сверки (ловит темы,
+               пропущенные в отдельных дельтах, не раздувая контекст);
+- final      — на «Стоп»: весь транскрипт последовательными окнами,
+               плюс сбор findings (тезисов) для отчёта.
+"""
 from __future__ import annotations
 
 import asyncio
@@ -20,10 +28,12 @@ from .schemas import (
     STATUS_RANK,
     AnalysisResponse,
     CoverageState,
+    Finding,
     Recommendation,
     TopicState,
     TopicUpdate,
-    build_analysis_schema,
+    build_final_schema,
+    build_live_schema,
 )
 
 log = logging.getLogger("ilh.coverage")
@@ -59,10 +69,18 @@ class CoverageEngine:
             t.id: {"order": i, "question": t.question, "section_title": s.title}
             for i, (s, t) in enumerate(guide.all_topics())
         }
-        self._system = prompts.system_prompt(guide, analysis_cfg.max_recommendations)
-        self._schema = build_analysis_schema()
-        self._recs: dict[str, Recommendation] = {}
+        self._system_live = prompts.system_prompt_live(
+            guide, analysis_cfg.max_recommendations, analysis_cfg.max_probes
+        )
+        self._system_final = prompts.system_prompt_final(guide)
+        self._live_schema = build_live_schema()
+        self._final_schema = build_final_schema()
+
+        self._recs: dict[str, Recommendation] = {}  # coverage_gap, ключ = topic_id
+        self._probes: list[Recommendation] = []     # свежие пробы, заменяются каждый цикл
+        self._findings: dict[str, list[str]] = {}   # topic_id -> тезисы (финальный проход)
         self._cursor = 0
+        self._reconcile_cursor = 0
         self._lock = asyncio.Lock()
         self.analyzing = False
         self.next_analysis_at: float | None = None
@@ -70,7 +88,10 @@ class CoverageEngine:
     # ------------------------------------------------------------- планировщик
 
     async def run(self, stop_event: asyncio.Event, manual_event: asyncio.Event) -> None:
-        log.info("Планировщик анализа запущен: интервал %d c", self.cfg.interval_s)
+        log.info(
+            "Планировщик анализа запущен: интервал %d c, сверка каждый %s-й цикл",
+            self.cfg.interval_s, self.cfg.reconcile_every or "—",
+        )
         try:
             while not stop_event.is_set():
                 self.next_analysis_at = time.time() + self.cfg.interval_s
@@ -99,7 +120,7 @@ class CoverageEngine:
         stop_t = asyncio.create_task(stop_event.wait())
         manual_t = asyncio.create_task(manual_event.wait())
         try:
-            done, pending = await asyncio.wait(
+            done, _ = await asyncio.wait(
                 {stop_t, manual_t}, timeout=remaining, return_when=asyncio.FIRST_COMPLETED
             )
         finally:
@@ -120,71 +141,128 @@ class CoverageEngine:
 
     # ----------------------------------------------------------------- анализ
 
+    def _pick_mode(self) -> str:
+        next_iter = self.state.analysis_iteration + 1
+        if self.cfg.reconcile_every > 0 and next_iter % self.cfg.reconcile_every == 0:
+            return "reconcile"
+        return "delta"
+
     async def analyze(self, manual: bool = False) -> None:
         if self._lock.locked():
             await self.notify("status", {"message": "Анализ уже выполняется"})
             return
         async with self._lock:
-            delta, next_cursor = self.transcript.delta_since(self._cursor)
-            if not delta:
+            mode = self._pick_mode()
+            cursor = self._reconcile_cursor if mode == "reconcile" else self._cursor
+            segments, new_cursor = self.transcript.delta_since(cursor)
+            if not segments:
                 await self.notify("status", {"message": "Нет новых реплик — анализ пропущен"})
                 return
+            ok = await self._run_analysis(segments, mode, manual)
+            if ok:
+                self._cursor = max(self._cursor, new_cursor)
+                if mode == "reconcile":
+                    self._reconcile_cursor = new_cursor
 
-            self.analyzing = True
-            try:
-                await self.notify(
-                    "analysis",
-                    {"phase": "started", "manual": manual, "new_segments": len(delta)},
-                )
-                started = time.monotonic()
-                log_entry: dict = {
-                    "iteration": self.state.analysis_iteration + 1,
-                    "ts": datetime.now().astimezone().isoformat(),
-                    "manual": manual,
-                    "delta_segments": len(delta),
-                }
-                try:
-                    user = prompts.user_prompt(self.state, self.guide, delta, self.llm_cfg.max_delta_chars)
-                    parsed, meta = await self.llm.chat_json(self._system, user, self._schema)
-                    log_entry.update(
-                        duration_s=round(meta.duration_s, 1),
-                        prompt_chars=meta.prompt_chars,
-                        eval_count=meta.eval_count,
-                        prompt_eval_count=meta.prompt_eval_count,
-                        retried=meta.retried,
-                        raw_response=meta.raw_response[:20000],
-                    )
-                except OllamaError as e:
-                    # Курсор не двигаем: эта дельта попадёт в следующий цикл.
-                    log_entry["error"] = str(e)
-                    self._persist_log(log_entry)
-                    log.error("Цикл анализа не удался: %s", e)
-                    await self.notify("error", {"message": f"Анализ не удался: {e}"})
-                    await self.notify("analysis", {"phase": "failed"})
-                    return
-
-                response = self._validate(parsed)
-                applied = self._apply_response(response)
-                self._cursor = next_cursor
-                self.state.analysis_iteration += 1
-                self.state.updated_at = datetime.now().astimezone().isoformat()
-            finally:
-                self.analyzing = False
-
-            self._persist(log_entry)
-            counts = self.state.counts()
-            log.info(
-                "Анализ #%d: %d обновлений, %d рекомендаций, %.1f c (покрыто %d/%d)",
-                self.state.analysis_iteration, applied, len(self._recs),
-                time.monotonic() - started, counts["covered"], counts["total"],
+    async def final_pass(self) -> bool:
+        """Финальная сверка всего транскрипта окнами; собирает findings.
+        Вызывается на «Стоп» после того, как ASR дожал очередь."""
+        if self.transcript is None or self.llm is None:
+            return False
+        segments = sorted(self.transcript.all_segments(), key=lambda s: s.t0)
+        if not segments:
+            return False
+        windows = self._split_windows(segments, self.llm_cfg.max_delta_chars)
+        log.info("Финальная сверка: %d окон, %d сегментов", len(windows), len(segments))
+        for i, window in enumerate(windows, 1):
+            await self.notify(
+                "status",
+                {"message": f"Финальная сверка транскрипта: {i}/{len(windows)}…"},
             )
-            await self.notify("coverage", self.coverage_payload())
-            await self.notify("recommendations", self.recommendations_payload())
+            async with self._lock:
+                ok = await self._run_analysis(window, "final", manual=False)
+            if not ok:
+                log.warning("Финальная сверка прервана на окне %d/%d", i, len(windows))
+                return False
+        self._cursor = self._reconcile_cursor = len(self.transcript)
+        return True
+
+    @staticmethod
+    def _split_windows(segments: list[Segment], max_chars: int) -> list[list[Segment]]:
+        windows: list[list[Segment]] = [[]]
+        size = 0
+        for seg in segments:
+            cost = len(seg.text) + 24  # префикс «[MM:SS] И: »
+            if windows[-1] and size + cost > max_chars:
+                windows.append([])
+                size = 0
+            windows[-1].append(seg)
+            size += cost
+        return [w for w in windows if w]
+
+    async def _run_analysis(self, segments: list[Segment], mode: str, manual: bool) -> bool:
+        final = mode == "final"
+        self.analyzing = True
+        started = time.monotonic()
+        log_entry: dict = {
+            "iteration": self.state.analysis_iteration + 1,
+            "ts": datetime.now().astimezone().isoformat(),
+            "mode": mode,
+            "manual": manual,
+            "segments": len(segments),
+        }
+        try:
             await self.notify(
                 "analysis",
-                {"phase": "done", "iteration": self.state.analysis_iteration,
-                 "duration_s": round(time.monotonic() - started, 1), "applied": applied},
+                {"phase": "started", "mode": mode, "manual": manual, "new_segments": len(segments)},
             )
+            system = self._system_final if final else self._system_live
+            schema = self._final_schema if final else self._live_schema
+            user = prompts.user_prompt(
+                self.state, self.guide, segments, self.llm_cfg.max_delta_chars, mode
+            )
+            try:
+                parsed, meta = await self.llm.chat_json(system, user, schema)
+                log_entry.update(
+                    duration_s=round(meta.duration_s, 1),
+                    prompt_chars=meta.prompt_chars,
+                    eval_count=meta.eval_count,
+                    prompt_eval_count=meta.prompt_eval_count,
+                    retried=meta.retried,
+                    raw_response=meta.raw_response[:20000],
+                )
+            except OllamaError as e:
+                # Курсоры не двигаем: фрагмент попадёт в следующий цикл.
+                log_entry["error"] = str(e)
+                self._persist_log(log_entry)
+                log.error("Цикл анализа (%s) не удался: %s", mode, e)
+                await self.notify("error", {"message": f"Анализ не удался: {e}"})
+                await self.notify("analysis", {"phase": "failed"})
+                return False
+
+            response = self._validate(parsed)
+            applied = self._apply_response(response, mode)
+            self.state.analysis_iteration += 1
+            self.state.updated_at = datetime.now().astimezone().isoformat()
+        finally:
+            self.analyzing = False
+
+        self._persist(log_entry)
+        counts = self.state.counts()
+        log.info(
+            "Анализ #%d (%s): %d обновлений, %d рекомендаций, %d проб, %.1f c (покрыто %d/%d)",
+            self.state.analysis_iteration, mode, applied, len(self._recs), len(self._probes),
+            time.monotonic() - started, counts["covered"], counts["total"],
+        )
+        await self.notify("coverage", self.coverage_payload())
+        if not final:
+            await self.notify("recommendations", self.recommendations_payload())
+        await self.notify(
+            "analysis",
+            {"phase": "done", "mode": mode, "iteration": self.state.analysis_iteration,
+             "duration_s": round(time.monotonic() - started, 1), "applied": applied},
+        )
+        return True
 
     # ------------------------------------------------------- валидация/слияние
 
@@ -192,6 +270,7 @@ class CoverageEngine:
         """Повреждённые элементы отбрасываются по одному, остальное сохраняем."""
         updates: list[TopicUpdate] = []
         recs: list[Recommendation] = []
+        findings: list[Finding] = []
         for item in parsed.get("topic_updates") or []:
             try:
                 updates.append(TopicUpdate.model_validate(item))
@@ -202,9 +281,14 @@ class CoverageEngine:
                 recs.append(Recommendation.model_validate(item))
             except ValidationError as e:
                 log.warning("Отброшена невалидная рекомендация %r: %s", item, e)
-        return AnalysisResponse(topic_updates=updates, recommendations=recs)
+        for item in parsed.get("findings") or []:
+            try:
+                findings.append(Finding.model_validate(item))
+            except ValidationError as e:
+                log.warning("Отброшен невалидный finding %r: %s", item, e)
+        return AnalysisResponse(topic_updates=updates, recommendations=recs, findings=findings)
 
-    def _apply_response(self, resp: AnalysisResponse) -> int:
+    def _apply_response(self, resp: AnalysisResponse, mode: str = "delta") -> int:
         iteration = self.state.analysis_iteration + 1
         applied = 0
         unknown: list[str] = []
@@ -223,23 +307,39 @@ class CoverageEngine:
         if unknown:
             log.warning("LLM вернула неизвестные topic_id (игнорирую): %s", unknown)
 
-        for rec in resp.recommendations:
-            if rec.topic_id:
-                st = self.state.topics.get(rec.topic_id)
-                if st is None:
-                    log.warning("Рекомендация для неизвестной темы %s — игнорирую", rec.topic_id)
+        if mode == "final":
+            for f in resp.findings:
+                if f.topic_id not in self.state.topics or not f.finding.strip():
                     continue
-                if st.status == "covered":
-                    continue
-                self._recs[rec.topic_id] = rec
-            else:
-                self._recs[f"{rec.type}#{len(self._recs)}"] = rec
+                bucket = self._findings.setdefault(f.topic_id, [])
+                if f.finding not in bucket:
+                    bucket.append(f.finding.strip())
+        else:
+            self._merge_recommendations(resp.recommendations)
 
         for key in list(self._recs):
             tid = self._recs[key].topic_id
             if tid and self.state.topics.get(tid) and self.state.topics[tid].status == "covered":
                 del self._recs[key]
         return applied
+
+    def _merge_recommendations(self, recs: list[Recommendation]) -> None:
+        probes: list[Recommendation] = []
+        for rec in recs:
+            if rec.topic_id and rec.topic_id not in self.state.topics:
+                log.warning("Рекомендация для неизвестной темы %s — отвязываю", rec.topic_id)
+                rec.topic_id = None
+            if rec.type == "probe":
+                probes.append(rec)
+                continue
+            if not rec.topic_id:
+                log.warning("coverage_gap без topic_id — игнорирую")
+                continue
+            if self.state.topics[rec.topic_id].status == "covered":
+                continue
+            self._recs[rec.topic_id] = rec
+        # Пробы живут один цикл: устаревшие подсказки «копнуть» только мешают.
+        self._probes = probes[: self.cfg.max_probes]
 
     # ------------------------------------------------------------ payload/диск
 
@@ -252,7 +352,11 @@ class CoverageEngine:
         }
 
     def recommendations_payload(self) -> dict:
-        return {"items": self.current_recommendations(), "iteration": self.state.analysis_iteration}
+        return {
+            "items": self.current_recommendations(),
+            "probes": self.current_probes(),
+            "iteration": self.state.analysis_iteration,
+        }
 
     def current_recommendations(self) -> list[dict]:
         items = []
@@ -277,13 +381,23 @@ class CoverageEngine:
             it.pop("_order", None)
         return items[: self.cfg.max_recommendations]
 
+    def current_probes(self) -> list[dict]:
+        out = []
+        for rec in self._probes:
+            meta = self._topic_meta.get(rec.topic_id or "", {})
+            out.append({**rec.model_dump(), "topic_question": meta.get("question")})
+        return out
+
+    def findings(self) -> dict[str, list[str]]:
+        return {tid: list(items) for tid, items in self._findings.items()}
+
     def _persist(self, log_entry: dict) -> None:
         if self.store is None:
             return
         try:
             self.store.save_coverage(self.state)
             self.store.append_recommendations(
-                self.state.analysis_iteration, self.current_recommendations()
+                self.state.analysis_iteration, self.current_recommendations() + self.current_probes()
             )
             self._persist_log(log_entry)
             if self.transcript is not None:

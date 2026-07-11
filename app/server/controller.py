@@ -12,12 +12,14 @@ from datetime import datetime
 from .. import __version__
 from ..config import AppConfig
 from ..coverage.engine import CoverageEngine
-from ..domain import AudioChunk, Speaker
+from ..domain import SPEAKER_FULL_RU, AudioChunk, Speaker
+from ..guide.library import GuideLibrary
 from ..guide.parser import parse_guide_text
 from ..guide.schemas import Guide
 from ..llm.ollama_client import OllamaClient, OllamaError
-from ..transcript.store import TranscriptStore
+from ..storage import report
 from ..storage.session_store import SessionStore
+from ..transcript.store import TranscriptStore
 from .hub import WsHub
 
 log = logging.getLogger("ilh.controller")
@@ -39,12 +41,17 @@ class SessionRuntime:
         self.asr_queue: "queue.Queue[AudioChunk]" = queue.Queue()
         self.engine: CoverageEngine | None = None
         self.scheduler_task: asyncio.Task | None = None
+        self.watchdog_task: asyncio.Task | None = None
         self.thread_stop = threading.Event()
         self.engine_stop: asyncio.Event | None = None
         self.manual_event: asyncio.Event | None = None
         self.guide: Guide | None = None
         self.started_wall: str = ""
+        self.started_at_epoch: float = 0.0
+        self.t0_mono: float = 0.0
+        self.duration_min: int = 60
         self.asr_status: str = "loading"
+        self.channel_alive: dict[str, bool] = {}
 
 
 class AppController:
@@ -52,9 +59,12 @@ class AppController:
         self.cfg = cfg
         self.hub = hub
         self.llm = OllamaClient(cfg.llm)
+        self.library = GuideLibrary(cfg.guides_path)
         self.state = "idle"  # idle | starting | running | stopping
         self.rt: SessionRuntime | None = None
         self._transition_lock = asyncio.Lock()
+        self._monitor_caps: list = []
+        self._monitor_task: asyncio.Task | None = None
 
     # ------------------------------------------------------------------ гайд
 
@@ -69,9 +79,60 @@ class AppController:
         except ValueError as e:
             raise ControllerError(str(e)) from e
 
+    # ------------------------------------------------- монитор уровней (idle)
+
+    async def start_monitor(self, mic_index: int | None, system_index: int | None) -> dict:
+        """Открывает выбранные устройства до старта сессии, чтобы UI показывал
+        уровни и пользователь убедился в маршрутизации звука."""
+        if self.state != "idle":
+            raise ControllerError("Сессия уже идёт — уровни транслируются из неё")
+        from ..audio.capture import ChannelCapture
+
+        await self.stop_monitor()
+        caps, errors = [], {}
+        pairs = ((mic_index, Speaker.INTERVIEWER), (system_index, Speaker.RESPONDENT))
+        for idx, speaker in pairs:
+            if idx is None or idx < 0:
+                continue
+            try:
+                cap = ChannelCapture(idx, speaker, self.cfg.audio)
+                await asyncio.to_thread(cap.start)
+                caps.append(cap)
+            except Exception as e:
+                errors[speaker.value.lower()] = str(e)
+        self._monitor_caps = caps
+        if caps:
+            self._monitor_task = asyncio.create_task(self._levels_loop(caps, monitor=True))
+        return {"ok": bool(caps), "errors": errors}
+
+    async def stop_monitor(self) -> None:
+        task, self._monitor_task = self._monitor_task, None
+        if task is not None:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+        caps, self._monitor_caps = self._monitor_caps, []
+        for cap in caps:
+            try:
+                await asyncio.to_thread(cap.stop)
+            except Exception:
+                log.exception("Ошибка остановки монитора")
+
+    async def _levels_loop(self, captures: list, monitor: bool) -> None:
+        try:
+            while True:
+                payload = {"monitor": monitor}
+                for cap in captures:
+                    payload[cap.speaker.value.lower()] = round(cap.level, 3)
+                await self.hub.broadcast("levels", payload)
+                await asyncio.sleep(0.12)
+        except asyncio.CancelledError:
+            raise
+
     # ---------------------------------------------------------------- сессия
 
-    async def start_session(self, mic_index: int, system_index: int, guide_data: dict) -> dict:
+    async def start_session(
+        self, mic_index: int, system_index: int, guide_data: dict, duration_min: int | None = None
+    ) -> dict:
         async with self._transition_lock:
             if self.state != "idle":
                 raise ControllerError("Сессия уже запущена")
@@ -88,14 +149,17 @@ class AppController:
             if not check["ok"]:
                 raise ControllerError(check["error"] or "LLM недоступна")
 
+            await self.stop_monitor()  # освобождаем устройства перед сессией
             self.state = "starting"
             await self._status("Запуск сессии…")
             rt = SessionRuntime()
+            rt.duration_min = duration_min or self.cfg.analysis.default_duration_min
             try:
                 await self._build_runtime(rt, mic_index, system_index, guide)
             except Exception as e:
                 log.exception("Не удалось запустить сессию")
-                await self._teardown_runtime(rt)
+                await self._stop_audio_asr(rt)
+                await self._final_persist(rt)
                 self.state = "idle"
                 await self._status("Ошибка запуска")
                 raise ControllerError(str(e)) from e
@@ -104,7 +168,11 @@ class AppController:
             self.state = "running"
             await self._status("Сессия идёт. ASR догружается…"
                                if rt.asr_status == "loading" else "Сессия идёт")
-            await self.hub.broadcast("session", {"state": "running", "session_id": rt.store.session_id})
+            await self.hub.broadcast(
+                "session",
+                {"state": "running", "session_id": rt.store.session_id,
+                 "started_at": rt.started_at_epoch, "duration_min": rt.duration_min},
+            )
             return {"session_id": rt.store.session_id}
 
     async def _build_runtime(self, rt: SessionRuntime, mic_index: int, system_index: int, guide: Guide) -> None:
@@ -116,8 +184,11 @@ class AppController:
 
         rt.guide = guide
         rt.started_wall = datetime.now().astimezone().isoformat()
+        rt.started_at_epoch = time.time()
 
-        rt.store = SessionStore.create(self.cfg, {"guide_title": guide.title})
+        rt.store = SessionStore.create(
+            self.cfg, {"guide_title": guide.title, "duration_min": rt.duration_min}
+        )
         rt.store.save_guide(guide)
 
         rt.transcript = TranscriptStore()
@@ -139,10 +210,12 @@ class AppController:
         )
         rt.asr_worker.start()  # модель грузится в фоне; аудио тем временем копится
 
+        rt.t0_mono = time.monotonic()
         for device_index, speaker in ((mic_index, Speaker.INTERVIEWER), (system_index, Speaker.RESPONDENT)):
             capture = ChannelCapture(device_index, speaker, self.cfg.audio)
             capture.start()
             rt.captures.append(capture)
+            rt.channel_alive[speaker.value.lower()] = True
             chunker = ChunkerThread(
                 speaker, capture.ring, create_detector(self.cfg.audio.vad),
                 rt.asr_queue, self.cfg.audio, rt.thread_stop,
@@ -163,6 +236,55 @@ class AppController:
             session_id=rt.store.session_id,
         )
         rt.scheduler_task = asyncio.create_task(rt.engine.run(rt.engine_stop, rt.manual_event))
+        rt.watchdog_task = asyncio.create_task(self._watchdog_loop(rt))
+
+    # ------------------------------------------------------- watchdog каналов
+
+    async def _watchdog_loop(self, rt: SessionRuntime) -> None:
+        """VU-уровни в UI + контроль, что устройства живы; мёртвые переоткрываются."""
+        silence_s = self.cfg.audio.watchdog_silence_s
+        last_reopen: dict[str, float] = {}
+        tick = 0
+        try:
+            while True:
+                await asyncio.sleep(0.12)
+                payload = {"monitor": False}
+                for cap in rt.captures:
+                    payload[cap.speaker.value.lower()] = round(cap.level, 3)
+                await self.hub.broadcast("levels", payload)
+
+                tick += 1
+                if tick % 25 != 0:  # проверка живости ~раз в 3 c
+                    continue
+                now = time.monotonic()
+                for cap in rt.captures:
+                    key = cap.speaker.value.lower()
+                    alive = (now - cap.last_sample_time) <= silence_s
+                    if alive != rt.channel_alive.get(key, True):
+                        rt.channel_alive[key] = alive
+                        name = SPEAKER_FULL_RU[cap.speaker]
+                        await self.hub.broadcast(
+                            "channel", {"speaker": key, "alive": alive, "device": cap.device_name}
+                        )
+                        if alive:
+                            await self.hub.broadcast(
+                                "status", {"message": f"Канал «{name}» восстановлен"}
+                            )
+                    if not alive and now - last_reopen.get(key, 0.0) > 10.0:
+                        last_reopen[key] = now
+                        await self.hub.broadcast("error", {
+                            "message": f"Канал «{SPEAKER_FULL_RU[cap.speaker]}» не получает звук "
+                                       f"(устройство «{cap.device_name}») — переоткрываю",
+                        })
+                        try:
+                            await asyncio.to_thread(cap.stop)
+                            await asyncio.to_thread(cap.start)
+                        except Exception as e:
+                            log.warning("Не удалось переоткрыть устройство %s: %s", cap.device_name, e)
+        except asyncio.CancelledError:
+            raise
+
+    # ------------------------------------------------------------- остановка
 
     async def stop_session(self) -> dict:
         async with self._transition_lock:
@@ -171,7 +293,24 @@ class AppController:
             self.state = "stopping"
             rt = self.rt
             await self._status("Остановка: дораспознаём хвост аудио…")
-            await self._teardown_runtime(rt)
+            await self._stop_audio_asr(rt)
+
+            has_transcript = rt.transcript is not None and len(rt.transcript) > 0
+            if self.cfg.analysis.final_sweep and rt.engine is not None and has_transcript:
+                try:
+                    await rt.engine.final_pass()
+                except Exception:
+                    log.exception("Финальная сверка не удалась")
+                    await self.hub.broadcast("error", {"message": "Финальная сверка не удалась — статусы сохранены как есть"})
+            if self.cfg.analysis.report and rt.engine is not None and has_transcript:
+                await self._status("Готовлю отчёт сессии…")
+                try:
+                    await self._write_report(rt)
+                except Exception:
+                    log.exception("Не удалось собрать отчёт")
+                    await self.hub.broadcast("error", {"message": "Отчёт не собран — подробности в logs/app.log"})
+
+            await self._final_persist(rt)
             session_id = rt.store.session_id if rt.store else None
             self.rt = None
             self.state = "idle"
@@ -180,16 +319,15 @@ class AppController:
             await self.hub.broadcast("timer", {"next_analysis_at": None, "interval_s": self.cfg.analysis.interval_s})
             return {"session_id": session_id}
 
-    async def _teardown_runtime(self, rt: SessionRuntime) -> None:
-        # 1. Останавливаем планировщик анализа.
+    async def _stop_audio_asr(self, rt: SessionRuntime) -> None:
+        # 1. Останавливаем планировщик анализа и watchdog.
         if rt.engine_stop is not None:
             rt.engine_stop.set()
-        if rt.scheduler_task is not None:
-            rt.scheduler_task.cancel()
-            try:
-                await rt.scheduler_task
-            except (asyncio.CancelledError, Exception):
-                pass
+        for task in (rt.scheduler_task, rt.watchdog_task):
+            if task is not None:
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+        rt.scheduler_task = rt.watchdog_task = None
         # 2. Захват: новые сэмплы больше не поступают.
         for capture in rt.captures:
             await asyncio.to_thread(capture.stop)
@@ -202,26 +340,48 @@ class AppController:
             await asyncio.to_thread(rt.asr_worker.join, 60.0)
             if rt.asr_worker.is_alive():
                 log.warning("ASR-воркер не завершился за 60 c — хвост может быть потерян")
-        # 5. Финальная запись на диск.
-        if rt.store is not None:
-            try:
-                if rt.engine is not None:
-                    rt.store.save_coverage(rt.engine.state)
-                    rt.store.append_recommendations(
-                        rt.engine.state.analysis_iteration, rt.engine.current_recommendations()
-                    )
-                if rt.transcript is not None and rt.guide is not None:
-                    rt.store.render_markdown(rt.transcript.all_segments(), rt.guide)
-                stats = {
-                    f"xruns_{c.speaker.value.lower()}": c.stats.xruns for c in rt.captures
-                }
-                rt.store.finalize(
-                    {"stopped_at": datetime.now().astimezone().isoformat(),
-                     "segments": len(rt.transcript) if rt.transcript else 0,
-                     **stats}
+
+    async def _final_persist(self, rt: SessionRuntime) -> None:
+        if rt.store is None:
+            return
+        try:
+            if rt.engine is not None:
+                rt.store.save_coverage(rt.engine.state)
+                rt.store.append_recommendations(
+                    rt.engine.state.analysis_iteration, rt.engine.current_recommendations()
                 )
-            except Exception:
-                log.exception("Ошибка финального сохранения сессии")
+            if rt.transcript is not None and rt.guide is not None:
+                rt.store.render_markdown(rt.transcript.all_segments(), rt.guide)
+            stats = {f"xruns_{c.speaker.value.lower()}": c.stats.xruns for c in rt.captures}
+            rt.store.finalize(
+                {"stopped_at": datetime.now().astimezone().isoformat(),
+                 "segments": len(rt.transcript) if rt.transcript else 0,
+                 **stats}
+            )
+        except Exception:
+            log.exception("Ошибка финального сохранения сессии")
+
+    async def _write_report(self, rt: SessionRuntime) -> None:
+        findings = rt.engine.findings()
+        summary = None
+        try:
+            user = report.summary_user_prompt(rt.guide, rt.engine.state, findings)
+            parsed, _ = await self.llm.chat_json(report.SUMMARY_SYSTEM, user, report.SUMMARY_SCHEMA)
+            summary = (parsed.get("summary") or "").strip() or None
+        except OllamaError as e:
+            log.warning("Резюме отчёта не удалось: %s — отчёт будет без него", e)
+        md = report.build_report_markdown(
+            session_id=rt.store.session_id,
+            guide=rt.guide,
+            state=rt.engine.state,
+            findings=findings,
+            flags=rt.store.flags,
+            meta={"started_at": rt.started_wall,
+                  "segments": len(rt.transcript) if rt.transcript else 0},
+            summary=summary,
+        )
+        rt.store.save_report(md)
+        await self._status("Отчёт сохранён: report.md")
 
     # ------------------------------------------------------------- прочее API
 
@@ -232,6 +392,14 @@ class AppController:
             raise ControllerError("Анализ уже выполняется")
         self.rt.manual_event.set()
 
+    async def add_flag(self, note: str = "") -> dict:
+        if self.state != "running" or self.rt is None or self.rt.store is None:
+            raise ControllerError("Сессия не запущена")
+        t = time.monotonic() - self.rt.t0_mono
+        flag = self.rt.store.add_flag(t, note.strip())
+        await self.hub.broadcast("flag", flag)
+        return flag
+
     def snapshot(self) -> dict:
         rt = self.rt
         snap: dict = {
@@ -239,21 +407,30 @@ class AppController:
             "app_version": __version__,
             "interval_s": self.cfg.analysis.interval_s,
             "llm_model": self.cfg.llm.model,
+            "default_duration_min": self.cfg.analysis.default_duration_min,
             "session_id": None,
             "guide": None,
             "coverage": None,
             "recommendations": None,
             "segments": [],
+            "flags": [],
             "next_analysis_at": None,
             "analyzing": False,
             "asr_status": None,
+            "started_at": None,
+            "duration_min": None,
+            "channels": {},
         }
         if rt is not None:
             snap.update(
                 session_id=rt.store.session_id if rt.store else None,
                 guide=rt.guide.model_dump() if rt.guide else None,
                 segments=[s.to_dict() for s in rt.transcript.tail(300)] if rt.transcript else [],
+                flags=list(rt.store.flags) if rt.store else [],
                 asr_status=rt.asr_status,
+                started_at=rt.started_at_epoch,
+                duration_min=rt.duration_min,
+                channels=dict(rt.channel_alive),
             )
             if rt.engine is not None:
                 snap.update(

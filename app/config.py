@@ -25,6 +25,11 @@ class ServerConfig:
 class AnalysisConfig:
     interval_s: int = 240
     max_recommendations: int = 6
+    max_probes: int = 2           # пробинг-вопросов за цикл (0 = выключить)
+    reconcile_every: int = 4      # каждый N-й цикл — сверка окна с прошлой сверки (0 = выкл)
+    final_sweep: bool = True      # финальный проход по всему транскрипту на «Стоп»
+    report: bool = True           # собирать report.md после сессии
+    default_duration_min: int = 60
 
 
 @dataclass
@@ -37,6 +42,7 @@ class AudioConfig:
     min_speech_s: float = 0.3
     pad_s: float = 0.2
     vad: str = "auto"  # auto | silero | energy
+    watchdog_silence_s: float = 12.0  # нет сэмплов дольше — канал считается умершим
 
 
 @dataclass
@@ -65,6 +71,7 @@ class LLMConfig:
 @dataclass
 class StorageConfig:
     sessions_dir: str = "sessions"
+    guides_dir: str = "guides"
     save_audio_chunks: bool = False  # WAV-чанки для отладки
 
 
@@ -81,6 +88,11 @@ class AppConfig:
     @property
     def sessions_path(self) -> Path:
         p = Path(self.storage.sessions_dir)
+        return p if p.is_absolute() else ROOT / p
+
+    @property
+    def guides_path(self) -> Path:
+        p = Path(self.storage.guides_dir)
         return p if p.is_absolute() else ROOT / p
 
     @staticmethod
