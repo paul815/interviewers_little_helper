@@ -7,6 +7,8 @@ import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
 
+from typing import Literal
+
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel
@@ -33,6 +35,16 @@ class SessionStartRequest(BaseModel):
     system_index: int
     guide: dict
     duration_min: int | None = None
+    asr_vocabulary: str = ""
+
+
+class TopicStatusRequest(BaseModel):
+    topic_id: str
+    status: Literal["covered", "partial", "not_covered"] | None = None
+
+
+class DismissRequest(BaseModel):
+    topic_id: str
 
 
 class MonitorRequest(BaseModel):
@@ -155,12 +167,22 @@ def create_app(cfg: AppConfig) -> FastAPI:
     @app.post("/api/session/start")
     async def session_start(req: SessionStartRequest):
         return await controller.start_session(
-            req.mic_index, req.system_index, req.guide, req.duration_min
+            req.mic_index, req.system_index, req.guide, req.duration_min, req.asr_vocabulary
         )
 
     @app.post("/api/session/flag")
     async def session_flag(req: FlagRequest):
         return await controller.add_flag(req.note)
+
+    @app.post("/api/topics/status")
+    async def topic_status(req: TopicStatusRequest):
+        await controller.set_topic_status(req.topic_id, req.status)
+        return {"ok": True}
+
+    @app.post("/api/recommendations/dismiss")
+    async def rec_dismiss(req: DismissRequest):
+        await controller.dismiss_recommendation(req.topic_id)
+        return {"ok": True}
 
     @app.post("/api/session/stop")
     async def session_stop():

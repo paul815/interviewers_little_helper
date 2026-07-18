@@ -79,6 +79,7 @@ class CoverageEngine:
         self._recs: dict[str, Recommendation] = {}  # coverage_gap, ключ = topic_id
         self._probes: list[Recommendation] = []     # свежие пробы, заменяются каждый цикл
         self._findings: dict[str, list[str]] = {}   # topic_id -> тезисы (финальный проход)
+        self._muted: set[str] = set()               # темы со скрытыми рекомендациями
         self._cursor = 0
         self._reconcile_cursor = 0
         self._lock = asyncio.Lock()
@@ -297,6 +298,8 @@ class CoverageEngine:
             if st is None:
                 unknown.append(upd.topic_id)
                 continue
+            if st.manual:
+                continue  # ручная отметка исследователя — последнее слово
             if STATUS_RANK[upd.status] <= STATUS_RANK[st.status]:
                 continue  # монотонность: статусы не понижаются и не «мигают»
             st.status = upd.status
@@ -341,6 +344,41 @@ class CoverageEngine:
         # Пробы живут один цикл: устаревшие подсказки «копнуть» только мешают.
         self._probes = probes[: self.cfg.max_probes]
 
+    # ------------------------------------------------- ручное управление (UI)
+
+    def set_manual_status(self, topic_id: str, status: str | None) -> None:
+        """status=None снимает ручную метку (статус остаётся, LLM снова может
+        его обновлять); иначе фиксирует статус за исследователем."""
+        st = self.state.topics.get(topic_id)
+        if st is None:
+            raise ValueError(f"Неизвестная тема: {topic_id}")
+        if status is None:
+            st.manual = False
+        else:
+            if status not in STATUS_RANK:
+                raise ValueError(f"Некорректный статус: {status}")
+            st.status = status  # ручная правка может и понижать статус
+            st.manual = True
+            st.confidence = None
+            st.evidence = "отмечено вручную"
+            if status == "covered":
+                self._recs.pop(topic_id, None)
+        st.last_update_iteration = self.state.analysis_iteration
+        self._muted.discard(topic_id)
+        self.state.updated_at = datetime.now().astimezone().isoformat()
+        if self.store is not None:
+            try:
+                self.store.save_coverage(self.state)
+            except Exception:
+                log.exception("Не удалось сохранить состояние после ручной правки")
+
+    def dismiss_recommendation(self, topic_id: str) -> None:
+        """Скрывает подсказку по теме до ручного изменения её статуса."""
+        if topic_id not in self.state.topics:
+            raise ValueError(f"Неизвестная тема: {topic_id}")
+        self._muted.add(topic_id)
+        self._recs.pop(topic_id, None)
+
     # ------------------------------------------------------------ payload/диск
 
     def coverage_payload(self) -> dict:
@@ -361,6 +399,8 @@ class CoverageEngine:
     def current_recommendations(self) -> list[dict]:
         items = []
         for rec in self._recs.values():
+            if rec.topic_id in self._muted:
+                continue
             meta = self._topic_meta.get(rec.topic_id or "", {})
             status = (
                 self.state.topics[rec.topic_id].status

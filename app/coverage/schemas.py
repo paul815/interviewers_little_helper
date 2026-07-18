@@ -22,6 +22,7 @@ class TopicState(BaseModel):
     confidence: float | None = None
     evidence: str | None = None
     last_update_iteration: int = 0
+    manual: bool = False  # выставлено исследователем вручную — LLM не переопределяет
 
 
 class CoverageState(BaseModel):

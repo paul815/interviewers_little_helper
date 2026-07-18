@@ -34,6 +34,7 @@ class MLXWhisperBackend(ASRBackend):
             path_or_hf_repo=self.cfg.mlx_model,
             language=self.cfg.language,
             condition_on_previous_text=False,
+            initial_prompt=self.cfg.vocabulary or None,
         )
         return ASRResult(
             text=(result.get("text") or "").strip(),

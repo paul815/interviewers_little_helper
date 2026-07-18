@@ -121,6 +121,7 @@ function handleMessage(type, p) {
         S.startedAt = null; S.channels = {};
       }
       renderHeader();
+      renderTopics();  // перепривязка кликов при смене режима
       renderPace();
       syncMonitor();
       break;
@@ -283,11 +284,20 @@ function renderRecs() {
         <span class="chip">${esc(STATUS_RU[r.status] || r.type)}</span>
         <span class="rec-topic" title="${esc(r.topic_question || "")}">${esc(r.section_title || "")}</span>
         <button class="copy" data-i="${i}" title="Скопировать вопрос">⧉</button>
+        ${r.topic_id ? `<button class="copy dismiss" data-tid="${esc(r.topic_id)}"
+          title="Скрыть подсказку по этой теме">✕</button>` : ""}
       </div>
       <div class="rec-q">${esc(r.suggested_question || r.topic_question || "")}</div>
       ${r.note ? `<div class="rec-note">${esc(r.note)}</div>` : ""}
     </div>`).join("");
   copyButtonsBind(box, S.recommendations);
+  box.querySelectorAll(".dismiss").forEach((b) => b.addEventListener("click", async () => {
+    try {
+      await api("/api/recommendations/dismiss", {
+        method: "POST", body: JSON.stringify({ topic_id: b.dataset.tid }),
+      });
+    } catch (e) { setStatus(e.message, true); }
+  }));
 }
 
 /* ---- темы ---- */
@@ -300,16 +310,33 @@ function renderTopics() {
     return;
   }
   const topics = (S.coverage && S.coverage.topics) || {};
+  const running = S.state === "running";
   box.innerHTML = guide.sections.map((sec) => `
     <div class="sec-title">${esc(sec.title)}</div>
     ${sec.topics.map((t) => {
-      const st = (topics[t.id] && topics[t.id].status) || "not_covered";
-      const ev = topics[t.id] && topics[t.id].evidence;
-      return `<div class="topic-row" title="${esc(ev || "")}">
-        <span class="st-ico ${st}">${STATUS_ICON[st]}</span>
+      const ts = topics[t.id] || {};
+      const st = ts.status || "not_covered";
+      const manual = !!ts.manual;
+      const tip = manual
+        ? "Отмечено вручную — клик, чтобы снова доверить LLM"
+        : (running ? "Клик — пометить покрытой вручную. " : "") + (ts.evidence || "");
+      return `<div class="topic-row ${running ? "clickable" : ""}" data-tid="${esc(t.id)}"
+                   data-manual="${manual ? 1 : 0}" title="${esc(tip)}">
+        <span class="st-ico ${st} ${manual ? "manual" : ""}">${manual ? "✔" : STATUS_ICON[st]}</span>
         <span class="topic-q ${st}">${esc(t.question)}</span>
       </div>`;
     }).join("")}`).join("");
+  if (running) {
+    box.querySelectorAll(".topic-row").forEach((row) => row.addEventListener("click", async () => {
+      const manual = row.dataset.manual === "1";
+      try {
+        await api("/api/topics/status", {
+          method: "POST",
+          body: JSON.stringify({ topic_id: row.dataset.tid, status: manual ? null : "covered" }),
+        });
+      } catch (e) { setStatus(e.message, true); }
+    }));
+  }
 }
 
 /* ---- транскрипт (сегменты + флаги) ---- */
@@ -556,6 +583,7 @@ async function startStop() {
           system_index: +$("sel-sys").value,
           guide: S.guideConfirmed,
           duration_min: +$("duration").value || null,
+          asr_vocabulary: $("vocab").value.trim(),
         }),
       });
       S.monitorOn = false; // сервер сам остановил монитор
@@ -618,6 +646,8 @@ $("btn-lib-del").addEventListener("click", libDelete);
 $("sel-mic").addEventListener("change", () => { renderHeader(); syncMonitor(true); });
 $("sel-sys").addEventListener("change", () => { renderHeader(); syncMonitor(true); });
 $("duration").addEventListener("change", (e) => { e.target.dataset.touched = "1"; });
+$("vocab").value = localStorage.getItem("ilh_vocab") || "";
+$("vocab").addEventListener("change", (e) => localStorage.setItem("ilh_vocab", e.target.value));
 
 document.addEventListener("keydown", (e) => {
   if (e.code !== "KeyF" || e.ctrlKey || e.metaKey || e.altKey) return;

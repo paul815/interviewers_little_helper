@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import logging
 import queue
 import threading
@@ -50,6 +51,7 @@ class SessionRuntime:
         self.started_at_epoch: float = 0.0
         self.t0_mono: float = 0.0
         self.duration_min: int = 60
+        self.asr_vocabulary: str = ""
         self.asr_status: str = "loading"
         self.channel_alive: dict[str, bool] = {}
 
@@ -131,7 +133,12 @@ class AppController:
     # ---------------------------------------------------------------- сессия
 
     async def start_session(
-        self, mic_index: int, system_index: int, guide_data: dict, duration_min: int | None = None
+        self,
+        mic_index: int,
+        system_index: int,
+        guide_data: dict,
+        duration_min: int | None = None,
+        asr_vocabulary: str | None = None,
     ) -> dict:
         async with self._transition_lock:
             if self.state != "idle":
@@ -154,6 +161,7 @@ class AppController:
             await self._status("Запуск сессии…")
             rt = SessionRuntime()
             rt.duration_min = duration_min or self.cfg.analysis.default_duration_min
+            rt.asr_vocabulary = (asr_vocabulary or self.cfg.asr.vocabulary).strip()
             try:
                 await self._build_runtime(rt, mic_index, system_index, guide)
             except Exception as e:
@@ -187,7 +195,9 @@ class AppController:
         rt.started_at_epoch = time.time()
 
         rt.store = SessionStore.create(
-            self.cfg, {"guide_title": guide.title, "duration_min": rt.duration_min}
+            self.cfg,
+            {"guide_title": guide.title, "duration_min": rt.duration_min,
+             "asr_vocabulary": rt.asr_vocabulary},
         )
         rt.store.save_guide(guide)
 
@@ -204,9 +214,10 @@ class AppController:
         def on_segment(chunk: AudioChunk, text: str, language: str | None) -> None:
             rt.transcript.add(chunk.speaker, chunk.t0, chunk.t1, text, language)
 
-        backend = create_asr_backend(self.cfg.asr)
+        asr_cfg = dataclasses.replace(self.cfg.asr, vocabulary=rt.asr_vocabulary)
+        backend = create_asr_backend(asr_cfg)
         rt.asr_worker = ASRWorker(
-            backend, rt.asr_queue, on_segment, asr_status, self.cfg.asr, rt.thread_stop
+            backend, rt.asr_queue, on_segment, asr_status, asr_cfg, rt.thread_stop
         )
         rt.asr_worker.start()  # модель грузится в фоне; аудио тем временем копится
 
@@ -391,6 +402,25 @@ class AppController:
         if self.rt.engine is not None and self.rt.engine.analyzing:
             raise ControllerError("Анализ уже выполняется")
         self.rt.manual_event.set()
+
+    async def set_topic_status(self, topic_id: str, status: str | None) -> None:
+        if self.state != "running" or self.rt is None or self.rt.engine is None:
+            raise ControllerError("Сессия не запущена")
+        try:
+            self.rt.engine.set_manual_status(topic_id, status)
+        except ValueError as e:
+            raise ControllerError(str(e)) from e
+        await self.hub.broadcast("coverage", self.rt.engine.coverage_payload())
+        await self.hub.broadcast("recommendations", self.rt.engine.recommendations_payload())
+
+    async def dismiss_recommendation(self, topic_id: str) -> None:
+        if self.state != "running" or self.rt is None or self.rt.engine is None:
+            raise ControllerError("Сессия не запущена")
+        try:
+            self.rt.engine.dismiss_recommendation(topic_id)
+        except ValueError as e:
+            raise ControllerError(str(e)) from e
+        await self.hub.broadcast("recommendations", self.rt.engine.recommendations_payload())
 
     async def add_flag(self, note: str = "") -> dict:
         if self.state != "running" or self.rt is None or self.rt.store is None:

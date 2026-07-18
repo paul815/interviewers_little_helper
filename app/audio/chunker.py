@@ -41,7 +41,10 @@ class ChunkAssembler:
 
     def flush(self) -> AudioChunk | None:
         """Финальный чанк при остановке сессии — забираем остаток речи."""
-        chunk = self._make_chunk(force_all=True)
+        if len(self._buf) / self.sr < self.cfg.min_speech_s:
+            return None
+        regions = self.detector.speech_regions(self._buf)
+        chunk = self._emit(regions, regions[-1][1]) if regions else None
         self._buf = np.zeros(0, dtype=np.float32)
         return chunk
 
@@ -58,31 +61,31 @@ class ChunkAssembler:
                 self._offset += consumed
                 self._buf = self._buf[consumed:]
             return None
+        # Пауза внутри буфера: завершённая реплика отрезается сразу, не дожидаясь
+        # тишины в хвосте (критично, когда аудио поступает пачкой и следующая
+        # реплика уже началась).
+        for (_, end_a), (start_b, _) in zip(regions, regions[1:]):
+            if start_b - end_a >= self.cfg.min_pause_s:
+                return self._emit([r for r in regions if r[1] <= end_a], end_a)
         trailing = dur - regions[-1][1]
         if trailing >= self.cfg.min_pause_s or dur >= self.cfg.max_chunk_s:
-            return self._make_chunk(regions=regions)
+            return self._emit(regions, regions[-1][1])
         return None
 
-    def _make_chunk(self, regions=None, force_all: bool = False) -> AudioChunk | None:
-        if force_all:
-            if len(self._buf) / self.sr < self.cfg.min_speech_s:
-                return None
-            regions = self.detector.speech_regions(self._buf)
-            if not regions:
-                return None
+    def _emit(self, regions: list[tuple[float, float]], end_s: float) -> AudioChunk | None:
+        """Вырезает [начало первой реплики − pad; end_s + pad] и сдвигает буфер."""
         dur = len(self._buf) / self.sr
         start_s = max(regions[0][0] - self.cfg.pad_s, 0.0)
-        end_s = min(regions[-1][1] + self.cfg.pad_s, dur)
+        end_pad = min(end_s + self.cfg.pad_s, dur)
         speech_total = sum(e - s for s, e in regions)
 
-        a, b = int(start_s * self.sr), int(end_s * self.sr)
+        a, b = int(start_s * self.sr), int(end_pad * self.sr)
         chunk_audio = self._buf[a:b].copy()
         t0 = (self._offset + a) / self.sr
         t1 = (self._offset + b) / self.sr
 
-        consumed = b
-        self._offset += consumed
-        self._buf = self._buf[consumed:]
+        self._offset += b
+        self._buf = self._buf[b:]
 
         if speech_total < self.cfg.min_speech_s:
             return None
@@ -121,6 +124,8 @@ class ChunkerThread(threading.Thread):
             log.exception("Чанкер %s аварийно остановлен", self.speaker.value)
         log.info("Чанкер %s остановлен", self.speaker.value)
 
+    MAX_BACKLOG = 60  # чанков; дальше ASR уже не догонит — не копим память впустую
+
     def _pump(self) -> None:
         if self.ring.dropped_samples > self._last_dropped:
             log.warning(
@@ -129,6 +134,13 @@ class ChunkerThread(threading.Thread):
             )
             self._last_dropped = self.ring.dropped_samples
         for chunk in self.assembler.feed(self.ring.pop_all()):
+            if self.out_queue.qsize() >= self.MAX_BACKLOG:
+                log.error(
+                    "Очередь ASR переполнена (%d) — чанк %s %.1f–%.1f c отброшен. "
+                    "ASR мёртв или безнадёжно отстаёт.",
+                    self.out_queue.qsize(), self.speaker.value, chunk.t0, chunk.t1,
+                )
+                continue
             self.out_queue.put(chunk)
             log.debug(
                 "Чанк %s: %.1f–%.1f c (%.1f c аудио)",

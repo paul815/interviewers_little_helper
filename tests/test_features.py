@@ -137,6 +137,67 @@ def test_final_mode_ignores_recommendations():
     assert eng.current_recommendations() == []
 
 
+# --------------------------------------------------------- ручное управление
+
+def test_manual_status_blocks_llm_updates():
+    eng = make_engine()
+    eng.set_manual_status("s1.t1", "partial")
+    eng._apply_response(eng._validate({
+        "topic_updates": [{"topic_id": "s1.t1", "status": "covered"}],
+    }))
+    assert eng.state.topics["s1.t1"].status == "partial"  # слово исследователя — последнее
+
+    eng.set_manual_status("s1.t1", None)  # метка снята — LLM снова может обновлять
+    eng._apply_response(eng._validate({
+        "topic_updates": [{"topic_id": "s1.t1", "status": "covered"}],
+    }))
+    assert eng.state.topics["s1.t1"].status == "covered"
+
+
+def test_manual_downgrade_allowed_for_user():
+    eng = make_engine()
+    eng._apply_response(eng._validate({
+        "topic_updates": [{"topic_id": "s1.t1", "status": "covered"}],
+    }))
+    eng.set_manual_status("s1.t1", "not_covered")  # пользователь поправил LLM вниз
+    st = eng.state.topics["s1.t1"]
+    assert st.status == "not_covered" and st.manual
+
+
+def test_manual_covered_drops_recommendation():
+    eng = make_engine()
+    eng._apply_response(eng._validate({"topic_updates": [], "recommendations": [
+        {"type": "coverage_gap", "topic_id": "s1.t1", "note": "x", "suggested_question": "y"},
+    ]}))
+    assert len(eng.current_recommendations()) == 1
+    eng.set_manual_status("s1.t1", "covered")
+    assert eng.current_recommendations() == []
+
+
+def test_dismiss_mutes_until_manual_change():
+    eng = make_engine()
+    rec = {"type": "coverage_gap", "topic_id": "s1.t2", "note": "x", "suggested_question": "y"}
+    eng._apply_response(eng._validate({"topic_updates": [], "recommendations": [rec]}))
+    eng.dismiss_recommendation("s1.t2")
+    assert eng.current_recommendations() == []
+
+    # Следующий цикл снова рекомендует ту же тему — остаётся скрытой.
+    eng._apply_response(eng._validate({"topic_updates": [], "recommendations": [rec]}))
+    assert eng.current_recommendations() == []
+
+    # Ручная правка статуса снимает скрытие.
+    eng.set_manual_status("s1.t2", "partial")
+    eng.set_manual_status("s1.t2", None)
+    eng._apply_response(eng._validate({"topic_updates": [], "recommendations": [rec]}))
+    assert [r["topic_id"] for r in eng.current_recommendations()] == ["s1.t2"]
+
+
+def test_set_manual_status_unknown_topic_raises():
+    eng = make_engine()
+    with pytest.raises(ValueError):
+        eng.set_manual_status("s9.t9", "covered")
+
+
 # ------------------------------------------------------------------ библиотека
 
 def test_guide_library_roundtrip(tmp_path):

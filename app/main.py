@@ -60,6 +60,17 @@ def main() -> None:
         cfg.server.port = args.port
     url = f"http://{cfg.server.host}:{cfg.server.port}"
 
+    probe = socket.socket()
+    try:
+        probe.bind((cfg.server.host, cfg.server.port))
+    except OSError:
+        raise SystemExit(
+            f"Порт {cfg.server.port} занят — похоже, приложение уже запущено "
+            f"(окно могло спрятаться за Zoom). Либо запустите с --port <другой порт>."
+        )
+    finally:
+        probe.close()
+
     server = build_server(cfg)
 
     if args.browser:

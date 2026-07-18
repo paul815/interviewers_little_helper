@@ -54,6 +54,9 @@ class ASRConfig:
     beam_size: int = 1
     language: str | None = None  # None = автоопределение на каждый чанк
     drop_no_speech_prob: float = 0.85
+    # Термины проекта (бренды, жаргон, имена) через запятую — подсказка Whisper,
+    # заметно улучшает распознавание именно этих слов.
+    vocabulary: str = ""
 
 
 @dataclass

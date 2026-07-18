@@ -73,6 +73,7 @@ class FasterWhisperBackend(ASRBackend):
             beam_size=self.cfg.beam_size,
             temperature=0.0,
             condition_on_previous_text=False,
+            initial_prompt=self.cfg.vocabulary or None,
             vad_filter=False,  # VAD уже отработал в чанкере
             without_timestamps=True,
         )
