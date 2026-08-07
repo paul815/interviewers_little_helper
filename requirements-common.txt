@@ -6,7 +6,16 @@ pydantic>=2.7
 numpy>=1.26
 sounddevice>=0.4.7
 soxr>=0.4
-# faster-whisper нужен на обеих платформах: Silero VAD (onnx) + CPU-фолбэк ASR.
-# На Windows/NVIDIA он же — основной ASR-бэкенд.
+# Parakeet TDT v3 — основной ASR-бэкенд: примерно на порядок быстрее Whisper и
+# в int8 на CPU не занимает VRAM (её целиком забирает LLM). [hub] — скачивание
+# весов с HuggingFace при первом запуске.
+onnx-asr[cpu,hub]>=0.11
+# Потоковый Silero VAD гоняем сами (app/audio/silero_stream.py); тот же
+# onnxruntime, который и так тянет onnx-asr с faster-whisper. ВАЖНО: не менять
+# на onnxruntime-gpu — CPU- и GPU-сборки в одном окружении конфликтуют.
+onnxruntime>=1.17
+# faster-whisper остаётся переключаемой опцией (asr.backend: faster): он умеет
+# словарь терминов через initial_prompt и языки вне 25 европейских, которые
+# покрывает Parakeet. На Windows/NVIDIA работает через CUDA.
 faster-whisper>=1.0.3,<2
 pywebview>=5.1

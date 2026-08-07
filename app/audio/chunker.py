@@ -1,22 +1,41 @@
-"""Нарезка непрерывного аудиопотока на чанки речи по паузам.
+"""Нарезка непрерывного аудиопотока на чанки речи.
 
-Чистая логика вынесена в ChunkAssembler (тестируется без потоков и железа),
-ChunkerThread — тонкая обёртка: RingBuffer -> ChunkAssembler -> очередь ASR.
+Две реализации с одним контрактом `feed()` / `flush()`:
+
+- `StreamingChunkAssembler` (основной) — режет по событиям потокового VAD:
+  реплика уходит в ASR через `vad_redemption_s` после того, как человек
+  замолчал. Каждый кадр аудио обрабатывается ровно один раз.
+- `ChunkAssembler` (запасной) — исходная нарезка по паузам: копит буфер и
+  ищет в нём паузу батчевым VAD'ом. Задержка привязана к `max_chunk_s`,
+  а разметка одного и того же аудио пересчитывается на каждом опросе.
+
+Обе тестируются без потоков и железа; ChunkerThread — тонкая обёртка:
+RingBuffer -> ассемблер -> очередь ASR.
 """
 from __future__ import annotations
 
 import logging
 import queue
 import threading
+from typing import Protocol
 
 import numpy as np
 
 from ..config import AudioConfig
 from ..domain import AudioChunk, Speaker
 from .capture import RingBuffer
+from .speech_events import SpeechEnd, SpeechEventSource, SpeechStart, create_stream_processor
 from .vad import SpeechDetector
 
 log = logging.getLogger("ilh.chunker")
+
+
+class ChunkAssemblerLike(Protocol):
+    def feed(self, new_audio: np.ndarray) -> list[AudioChunk]:
+        ...
+
+    def flush(self) -> AudioChunk | None:
+        ...
 
 
 class ChunkAssembler:
@@ -92,12 +111,144 @@ class ChunkAssembler:
         return AudioChunk(speaker=self.speaker, audio=chunk_audio, t0=t0, t1=t1)
 
 
+class StreamingChunkAssembler:
+    """Нарезка по событиям потокового VAD.
+
+    Держит скользящее окно недавнего аудио (`_buf`, начинающийся на абсолютной
+    позиции `_buf_start`) и вырезает из него реплику, как только пришёл
+    `SpeechEnd`. Ждать заполнения буфера не нужно, поэтому задержка сегмента
+    определяется только `vad_redemption_s` и скоростью ASR.
+
+    Инварианты:
+
+    - `t0/t1` — абсолютные секунды от старта захвата (на этом держится
+      восстановление порядка реплик двух каналов сортировкой по `t0`);
+    - соседние чанки не перекрываются и не оставляют дыр: `_emitted_through`
+      помнит, до какого сэмпла аудио уже отдано, и pad добавляется только на
+      настоящих границах речи, а не на принудительном разрезе монолога.
+    """
+
+    # Короче этого чанк не имеет смысла отдавать в ASR (модели выдают мусор).
+    MIN_EMIT_S = 0.1
+
+    def __init__(self, source: SpeechEventSource, cfg: AudioConfig, speaker: Speaker):
+        self.source = source
+        self.cfg = cfg
+        self.speaker = speaker
+        self.sr = cfg.sample_rate
+        self._buf = np.zeros(0, dtype=np.float32)
+        self._buf_start = 0        # абсолютная позиция сэмпла _buf[0]
+        self._stream_end = 0       # сколько сэмплов всего прошло через feed()
+        self._emitted_through = 0  # до какого сэмпла аудио уже отдано в ASR
+        self._speech_start: int | None = None
+        self._pre_pad = int(cfg.pre_pad_s * self.sr)
+        self._post_pad = int(cfg.pad_s * self.sr)
+        self._max_samples = int(cfg.max_chunk_s * self.sr)
+        # Между репликами гарантированно есть vad_redemption_s тишины — именно
+        # столько ждёт VAD, прежде чем закрыть реплику. Если pad'ы в сумме
+        # перекрывают этот зазор, конец одного чанка залезет на начало
+        # следующего и слова задвоятся в транскрипте.
+        if cfg.pre_pad_s + cfg.pad_s >= cfg.vad_redemption_s:
+            log.warning(
+                "pre_pad_s + pad_s (%.2f) >= vad_redemption_s (%.2f): соседние чанки "
+                "будут перекрываться, реплики задвоятся. Уменьшите pad'ы или увеличьте "
+                "vad_redemption_s.",
+                cfg.pre_pad_s + cfg.pad_s, cfg.vad_redemption_s,
+            )
+
+    def feed(self, new_audio: np.ndarray) -> list[AudioChunk]:
+        if len(new_audio):
+            self._buf = np.concatenate([self._buf, new_audio])
+            self._stream_end += len(new_audio)
+
+        out: list[AudioChunk] = []
+        for ev in self.source.process(new_audio):
+            if isinstance(ev, SpeechStart):
+                self._speech_start = ev.timestamp_samples
+            elif isinstance(ev, SpeechEnd):
+                self._append(out, self._emit(ev.start_timestamp_samples,
+                                             ev.end_timestamp_samples, pad_end=True))
+                self._speech_start = None
+        if not self.source.in_speech:
+            # Реплику отсеял фильтр минимальной длительности: SpeechStart был,
+            # SpeechEnd не будет.
+            self._speech_start = None
+
+        # Монолог длиннее max_chunk_s: режем принудительно, чтобы транскрипт
+        # не молчал до конца ответа.
+        if (
+            self._speech_start is not None
+            and self._stream_end - self._speech_start >= self._max_samples
+        ):
+            self._append(out, self._emit(self._speech_start, self._stream_end, pad_end=False))
+            self._speech_start = self._stream_end
+
+        self._trim()
+        return out
+
+    def flush(self) -> AudioChunk | None:
+        """Хвост при остановке сессии: закрываем незавершённую реплику."""
+        chunk = None
+        for ev in self.source.flush():
+            if isinstance(ev, SpeechEnd):
+                chunk = self._emit(ev.start_timestamp_samples,
+                                   ev.end_timestamp_samples, pad_end=True) or chunk
+        self._buf = np.zeros(0, dtype=np.float32)
+        self._buf_start = self._stream_end
+        self._speech_start = None
+        return chunk
+
+    @staticmethod
+    def _append(out: list[AudioChunk], chunk: AudioChunk | None) -> None:
+        if chunk is not None:
+            out.append(chunk)
+
+    def _emit(self, start: int, end: int, pad_end: bool) -> AudioChunk | None:
+        # Всё, что уже отдано, не отдаём повторно: после принудительного разреза
+        # SpeechEnd приносит исходное начало реплики, которое давно позади.
+        start = max(start, self._emitted_through)
+        if end - start < self.MIN_EMIT_S * self.sr:
+            return None
+
+        # Pre-pad только на настоящем начале реплики: Silero срабатывает чуть
+        # позже первого слога. На стыке после принудительного разреза padding
+        # продублировал бы уже отданное аудио.
+        a = start - self._pre_pad if start > self._emitted_through else start
+        b = end + self._post_pad if pad_end else end
+        a = max(a, self._buf_start)
+        b = min(b, self._stream_end)
+        if b <= a:
+            return None
+
+        audio = self._buf[a - self._buf_start : b - self._buf_start].copy()
+        self._emitted_through = end
+        return AudioChunk(speaker=self.speaker, audio=audio, t0=a / self.sr, t1=b / self.sr)
+
+    def _trim(self) -> None:
+        """Отбросить аудио, которое уже никому не понадобится."""
+        anchor = self._speech_start if self._speech_start is not None else self._stream_end
+        keep_from = max(0, anchor - self._pre_pad)
+        if keep_from > self._buf_start:
+            self._buf = self._buf[keep_from - self._buf_start :]
+            self._buf_start = keep_from
+
+
+def create_assembler(cfg: AudioConfig, speaker: Speaker) -> ChunkAssemblerLike:
+    """Ассемблер по `audio.vad`: потоковый по умолчанию, батчевый — по запросу."""
+    if cfg.vad in ("silero", "energy"):
+        from .vad import create_detector
+
+        log.info("Нарезка %s: батчевая по паузам (vad=%s)", speaker.value, cfg.vad)
+        return ChunkAssembler(create_detector(cfg.vad), cfg, speaker)
+    return StreamingChunkAssembler(create_stream_processor(cfg), cfg, speaker)
+
+
 class ChunkerThread(threading.Thread):
     def __init__(
         self,
         speaker: Speaker,
         ring: RingBuffer,
-        detector: SpeechDetector,
+        assembler: ChunkAssemblerLike,
         out_queue: "queue.Queue[AudioChunk]",
         cfg: AudioConfig,
         stop_event: threading.Event,
@@ -105,7 +256,7 @@ class ChunkerThread(threading.Thread):
         super().__init__(name=f"chunker-{speaker.value.lower()}", daemon=True)
         self.speaker = speaker
         self.ring = ring
-        self.assembler = ChunkAssembler(detector, cfg, speaker)
+        self.assembler = assembler
         self.out_queue = out_queue
         self.cfg = cfg
         self.stop_event = stop_event

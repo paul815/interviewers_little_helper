@@ -15,6 +15,13 @@ Write-Host "==> Зависимости из requirements-windows.txt"
 & .\.venv\Scripts\pip.exe install -r requirements-windows.txt
 
 Write-Host ""
+Write-Host "==> Веса ASR (Parakeet, ~670 МБ) — чтобы первое интервью не ждало загрузку"
+& .\.venv\Scripts\python.exe -m tools.fetch_asr_model
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "  !   Не удалось скачать — приложение доскачает при первом старте"
+}
+
+Write-Host ""
 Write-Host "Проверка окружения:"
 try {
     Invoke-WebRequest -Uri "http://127.0.0.1:11434/api/version" -UseBasicParsing -TimeoutSec 3 | Out-Null

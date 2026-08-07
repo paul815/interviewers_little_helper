@@ -24,6 +24,10 @@ echo "==> Зависимости из $REQ"
 pip install -r "$REQ"
 
 echo
+echo "==> Веса ASR (Parakeet, ~670 МБ) — чтобы первое интервью не ждало загрузку"
+python -m tools.fetch_asr_model || echo "  ! Не удалось скачать — приложение доскачает при первом старте"
+
+echo
 echo "Проверка окружения:"
 if command -v ollama >/dev/null 2>&1; then
   if curl -sf http://127.0.0.1:11434/api/version >/dev/null 2>&1; then

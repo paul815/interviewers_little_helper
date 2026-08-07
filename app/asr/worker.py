@@ -47,7 +47,11 @@ class ASRWorker(threading.Thread):
             t = time.monotonic()
             self.backend.load()
             self.ready = True
-            self.on_status("asr_ready", f"ASR готов: {self.backend.describe()} ({time.monotonic() - t:.0f} c)")
+            message = f"ASR готов: {self.backend.describe()} ({time.monotonic() - t:.0f} c)"
+            warnings = self.backend.warnings()
+            if warnings:
+                message += " — внимание: " + "; ".join(warnings)
+            self.on_status("asr_ready", message)
         except Exception as e:
             self.load_error = str(e)
             log.exception("Не удалось загрузить ASR-модель")

@@ -36,26 +36,46 @@ class AnalysisConfig:
 class AudioConfig:
     sample_rate: int = 16000
     ring_seconds: float = 120.0
-    poll_interval_s: float = 0.5
+    # Как часто чанкер забирает аудио из кольца. При потоковом VAD это ещё и
+    # гранулярность, с которой вообще замечается конец реплики, — значение
+    # заметно больше vad_redemption_s съело бы весь выигрыш в задержке.
+    poll_interval_s: float = 0.2
     max_chunk_s: float = 25.0
-    min_pause_s: float = 0.7
-    min_speech_s: float = 0.3
-    pad_s: float = 0.2
-    vad: str = "auto"  # auto | silero | energy
+    min_pause_s: float = 0.7   # только для батчевой нарезки (vad: silero | energy)
+    min_speech_s: float = 0.3  # только для батчевой нарезки
+    pad_s: float = 0.2         # post-pad: хвостовые согласные и дыхание
+    pre_pad_s: float = 0.3     # VAD всегда срабатывает позже первого слога
+    # auto | silero-stream | energy-stream — потоковая нарезка по событиям речи;
+    # silero | energy — исходная батчевая нарезка по паузам (запасной путь).
+    vad: str = "auto"
+    vad_positive_threshold: float = 0.50  # войти в речь
+    vad_negative_threshold: float = 0.35  # ...труднее, чем в ней остаться
+    vad_min_speech_s: float = 0.25        # короче — щелчок, а не реплика
+    vad_redemption_s: float = 0.6         # столько тишины = конец реплики
     watchdog_silence_s: float = 12.0  # нет сэмплов дольше — канал считается умершим
 
 
 @dataclass
 class ASRConfig:
-    backend: str = "auto"  # auto | mlx | faster | faster-cpu
+    # auto | parakeet | mlx | faster | faster-cpu
+    backend: str = "auto"
     model: str = "large-v3-turbo"
     mlx_model: str = "mlx-community/whisper-large-v3-turbo"
+    # Модель для бэкенда parakeet (onnx-asr). Тем же ключом можно взять
+    # русскоязычную gigaam-v2-rnnt — ценой поддержки смешанной RU/EN речи.
+    parakeet_model: str = "nemo-parakeet-tdt-0.6b-v3"
+    parakeet_quantization: str = "int8"
+    # CPU намеренно: int8-Parakeet на CPU справляется с запасом, а вся VRAM
+    # остаётся LLM. CUDAExecutionProvider требует onnxruntime-gpu, который
+    # конфликтует с CPU-сборкой onnxruntime (её тянет faster-whisper).
+    providers: list[str] = field(default_factory=lambda: ["CPUExecutionProvider"])
     compute_type: str = "auto"
     beam_size: int = 1
     language: str | None = None  # None = автоопределение на каждый чанк
     drop_no_speech_prob: float = 0.85
     # Термины проекта (бренды, жаргон, имена) через запятую — подсказка Whisper,
-    # заметно улучшает распознавание именно этих слов.
+    # заметно улучшает распознавание именно этих слов. Parakeet conditioning
+    # промптом не поддерживает: с ним настройка не работает (бэкенд предупредит).
     vocabulary: str = ""
 
 

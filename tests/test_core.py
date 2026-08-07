@@ -4,7 +4,15 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from app.audio.chunker import ChunkAssembler
+from app.audio.chunker import ChunkAssembler, StreamingChunkAssembler
+from app.audio.speech_events import (
+    FRAME_SAMPLES,
+    EnergyStreamProcessor,
+    SpeechEnd,
+    SpeechStart,
+    SpeechStateMachine,
+    create_stream_processor,
+)
 from app.audio.vad import EnergyDetector
 from app.config import AudioConfig, AnalysisConfig, LLMConfig
 from app.coverage.engine import CoverageEngine
@@ -93,6 +101,146 @@ def test_chunk_flush_returns_tail():
 
 def test_silence_only_never_chunks():
     asm = make_assembler()
+    assert feed_blocks(asm, silence(12.0)) == []
+    assert asm.flush() is None
+
+
+# ------------------------------------------------------- потоковый VAD
+
+def make_machine(**overrides) -> SpeechStateMachine:
+    params = dict(min_speech_s=0.25, redemption_s=0.6)
+    params.update(overrides)
+    return SpeechStateMachine(**params)
+
+
+def run_probs(machine: SpeechStateMachine, probs: list[float]) -> list:
+    events = []
+    for p in probs:
+        events.extend(machine.advance(p))
+    return events
+
+
+def frames(seconds: float) -> int:
+    """Сколько кадров VAD укладывается в отрезок времени."""
+    return int(seconds * SR / FRAME_SAMPLES)
+
+
+def test_state_machine_emits_start_and_end():
+    machine = make_machine()
+    events = run_probs(machine, [0.9] * frames(1.0) + [0.0] * frames(1.0))
+    assert [type(e) for e in events] == [SpeechStart, SpeechEnd]
+    start, end = events
+    assert start.timestamp_samples == 0
+    # Конец реплики — там, где началась тишина, а не там, где сработал redemption.
+    assert abs(end.end_timestamp_samples - 1.0 * SR) < 0.05 * SR
+
+
+def test_state_machine_redemption_survives_pause_inside_phrase():
+    """Пауза короче redemption не рвёт реплику на две."""
+    machine = make_machine()
+    events = run_probs(
+        machine,
+        [0.9] * frames(0.5) + [0.0] * frames(0.4) + [0.9] * frames(0.5) + [0.0] * frames(1.0),
+    )
+    assert [type(e) for e in events] == [SpeechStart, SpeechEnd]
+    assert events[1].end_timestamp_samples > 1.3 * SR  # обе половины внутри одной реплики
+
+
+def test_state_machine_hysteresis_sustains_on_marginal_frames():
+    """Вероятность между порогами реплику продолжает, но не начинает."""
+    machine = make_machine()
+    assert run_probs(machine, [0.4] * frames(1.0)) == []
+    events = run_probs(machine, [0.9] * frames(0.5) + [0.4] * frames(1.0) + [0.0] * frames(1.0))
+    assert [type(e) for e in events] == [SpeechStart, SpeechEnd]
+    assert events[1].end_timestamp_samples > 1.4 * SR
+
+
+def test_state_machine_drops_too_short_speech():
+    """Щелчок короче min_speech даёт SpeechStart, но не SpeechEnd."""
+    machine = make_machine()
+    events = run_probs(machine, [0.9] * frames(0.1) + [0.0] * frames(1.0))
+    assert [type(e) for e in events] == [SpeechStart]
+    assert not machine.in_speech
+
+
+def test_state_machine_flush_closes_open_speech():
+    machine = make_machine()
+    run_probs(machine, [0.9] * frames(1.0))
+    assert machine.in_speech
+    events = machine.flush(extra_samples=100)
+    assert [type(e) for e in events] == [SpeechEnd]
+    assert events[0].end_timestamp_samples == machine.cursor_samples + 100
+    assert not machine.in_speech
+
+
+def test_energy_processor_ignores_quiet_noise():
+    cfg = AudioConfig(vad="energy-stream")
+    proc = create_stream_processor(cfg)
+    assert isinstance(proc, EnergyStreamProcessor)
+    assert proc.process(tone(2.0, amp=0.0005)) == []
+    assert not proc.in_speech
+
+
+# ------------------------------------------- потоковая нарезка на чанки
+
+def make_stream_assembler(**overrides) -> StreamingChunkAssembler:
+    cfg = AudioConfig(vad="energy-stream", **overrides)
+    return StreamingChunkAssembler(create_stream_processor(cfg), cfg, Speaker.RESPONDENT)
+
+
+def test_stream_cuts_on_end_of_speech_not_on_max_chunk():
+    """Главный выигрыш: реплика уходит в ASR сразу после паузы."""
+    asm = make_stream_assembler(max_chunk_s=25.0)
+    chunks = feed_blocks(asm, np.concatenate([silence(0.5), tone(2.0), silence(1.5)]))
+    assert len(chunks) == 1
+    ch = chunks[0]
+    assert ch.speaker == Speaker.RESPONDENT
+    # Речь идёт с 0.5 до 2.5 c; допуски — на pre/post-pad и кадр VAD.
+    assert 0.1 <= ch.t0 <= 0.55
+    assert 2.4 <= ch.t1 <= 2.9
+    assert abs(len(ch.audio) / SR - (ch.t1 - ch.t0)) < 0.01
+
+
+def test_stream_two_replies_split_by_pause():
+    asm = make_stream_assembler()
+    audio = np.concatenate([tone(1.0), silence(1.2), tone(1.0), silence(1.2)])
+    chunks = feed_blocks(asm, audio)
+    assert len(chunks) == 2
+    assert chunks[0].t1 < chunks[1].t0  # не перекрываются
+
+
+def test_stream_forced_cut_on_monologue_without_overlap():
+    """Монолог режется по max_chunk_s, но без дублей и дыр на стыке."""
+    asm = make_stream_assembler(max_chunk_s=3.0)
+    chunks = feed_blocks(asm, np.concatenate([tone(8.0), silence(1.5)]))
+    assert len(chunks) >= 2
+    for prev, nxt in zip(chunks, chunks[1:]):
+        assert abs(nxt.t0 - prev.t1) < 0.35, "на стыке не должно быть ни дыры, ни перекрытия"
+
+
+def test_stream_timestamps_do_not_drift_over_many_feeds():
+    """t0/t1 — абсолютные секунды от старта захвата: дрейф сломал бы порядок
+    реплик между каналами (они сортируются по t0)."""
+    asm = make_stream_assembler()
+    audio = np.concatenate([tone(0.8), silence(1.2)] * 20)
+    chunks = feed_blocks(asm, audio, block_s=0.1)
+    assert len(chunks) == 20
+    for i, ch in enumerate(chunks):
+        expected_start = i * 2.0
+        assert abs(ch.t0 - expected_start) < 0.4, f"чанк {i}: t0={ch.t0}, ждали ~{expected_start}"
+    assert chunks == sorted(chunks, key=lambda c: c.t0)
+
+
+def test_stream_flush_returns_tail():
+    asm = make_stream_assembler()
+    assert feed_blocks(asm, np.concatenate([silence(0.5), tone(1.5)])) == []
+    final = asm.flush()
+    assert final is not None
+    assert 1.2 <= len(final.audio) / SR <= 2.2
+
+
+def test_stream_silence_only_never_chunks():
+    asm = make_stream_assembler()
     assert feed_blocks(asm, silence(12.0)) == []
     assert asm.flush() is None
 

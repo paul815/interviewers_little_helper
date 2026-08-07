@@ -9,12 +9,12 @@ import time
 import queue as queue_mod
 
 import numpy as np
+import pytest
 
 from app.asr.base import ASRBackend, ASRResult
 from app.asr.worker import ASRWorker
 from app.audio.capture import RingBuffer
-from app.audio.chunker import ChunkerThread
-from app.audio.vad import EnergyDetector
+from app.audio.chunker import ChunkerThread, create_assembler
 from app.config import ASRConfig, AnalysisConfig, AudioConfig, LLMConfig
 from app.coverage.engine import CoverageEngine
 from app.domain import Speaker
@@ -105,14 +105,20 @@ def silence(seconds: float) -> np.ndarray:
     return np.zeros(int(seconds * SR), dtype=np.float32)
 
 
-def test_audio_to_transcript_pipeline():
-    audio_cfg = AudioConfig(poll_interval_s=0.05, min_pause_s=0.4, min_speech_s=0.2, pad_s=0.05)
+# Оба пути нарезки: потоковый (по умолчанию) и батчевый по паузам (запасной).
+# Ни один не требует onnxruntime — энергетический источник событий встроен.
+@pytest.mark.parametrize("vad", ["energy-stream", "energy"])
+def test_audio_to_transcript_pipeline(vad):
+    audio_cfg = AudioConfig(
+        poll_interval_s=0.05, min_pause_s=0.4, min_speech_s=0.2, pad_s=0.05, vad=vad,
+    )
     ring = RingBuffer(audio_cfg.ring_seconds, SR)
     out_q: "queue_mod.Queue" = queue_mod.Queue()
     stop = threading.Event()
     transcript = TranscriptStore()
 
-    chunker = ChunkerThread(Speaker.RESPONDENT, ring, EnergyDetector(), out_q, audio_cfg, stop)
+    assembler = create_assembler(audio_cfg, Speaker.RESPONDENT)
+    chunker = ChunkerThread(Speaker.RESPONDENT, ring, assembler, out_q, audio_cfg, stop)
     backend = FakeASRBackend(["первая реплика", "вторая реплика"])
     worker = ASRWorker(
         backend, out_q,

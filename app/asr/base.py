@@ -27,3 +27,7 @@ class ASRBackend(ABC):
 
     def describe(self) -> str:
         return self.name
+
+    def warnings(self) -> list[str]:
+        """Что бэкенд не смог выполнить из настроек — показывается пользователю."""
+        return []

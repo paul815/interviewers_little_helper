@@ -187,8 +187,7 @@ class AppController:
         from ..asr.factory import create_asr_backend
         from ..asr.worker import ASRWorker
         from ..audio.capture import ChannelCapture
-        from ..audio.chunker import ChunkerThread
-        from ..audio.vad import create_detector
+        from ..audio.chunker import ChunkerThread, create_assembler
 
         rt.guide = guide
         rt.started_wall = datetime.now().astimezone().isoformat()
@@ -228,7 +227,7 @@ class AppController:
             rt.captures.append(capture)
             rt.channel_alive[speaker.value.lower()] = True
             chunker = ChunkerThread(
-                speaker, capture.ring, create_detector(self.cfg.audio.vad),
+                speaker, capture.ring, create_assembler(self.cfg.audio, speaker),
                 rt.asr_queue, self.cfg.audio, rt.thread_stop,
             )
             chunker.start()
