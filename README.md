@@ -45,9 +45,17 @@ ASR (Whisper) и LLM (Ollama) крутятся на вашей машине, в�
 
 ### 1. Python-окружение
 
+Быстрый путь — скрипт установки (создаёт `.venv`, ставит зависимости под вашу ОС
+и проверяет Ollama и виртуальный аудиокабель):
+
 ```bash
-git clone <этот репозиторий>
-cd interviewers_little_helper
+./setup.sh                                              # macOS / Linux
+powershell -ExecutionPolicy Bypass -File .\setup.ps1    # Windows
+```
+
+Вручную то же самое:
+
+```bash
 python3 -m venv .venv
 ```
 
