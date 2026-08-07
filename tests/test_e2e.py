@@ -149,6 +149,69 @@ def test_audio_to_transcript_pipeline(vad):
     assert 0 <= segs[0].t0 < segs[1].t0  # хронология сохранена
 
 
+def test_pipeline_latency_in_real_time():
+    """Задержка «человек договорил → строка в транскрипте» на живом темпе.
+
+    Аудио подаётся в RingBuffer блоками по 20 мс по стенным часам, как это
+    делал бы драйвер, и работают настоящие ChunkerThread + ASRWorker. ASR
+    отвечает мгновенно, поэтому замер показывает вклад **самого конвейера**:
+    `vad_redemption_s` (0.6) + до `poll_interval_s` (0.2) + работа VAD.
+    Ради этого числа всё и переделывалось, так что регресс тут должен ронять
+    тест, а не всплывать на живом интервью.
+
+    Границы широкие: нижняя ловит разрез посреди речи, верхняя — грубое
+    замедление, не мигая на медленном раннере.
+    """
+    cfg = AudioConfig(vad="energy-stream")
+    ring = RingBuffer(cfg.ring_seconds, SR)
+    out_q: "queue_mod.Queue" = queue_mod.Queue()
+    stop = threading.Event()
+    transcript = TranscriptStore()
+    arrivals: list[float] = []
+    transcript.add_listener(lambda seg: arrivals.append(time.monotonic()))
+
+    chunker = ChunkerThread(
+        Speaker.RESPONDENT, ring, create_assembler(cfg, Speaker.RESPONDENT),
+        out_q, cfg, stop,
+    )
+    worker = ASRWorker(
+        FakeASRBackend(["реплика"]), out_q,
+        on_segment=lambda ch, txt, lang: transcript.add(ch.speaker, ch.t0, ch.t1, txt, lang),
+        on_status=lambda phase, msg: None,
+        cfg=ASRConfig(), stop_event=stop,
+    )
+    chunker.start()
+    worker.start()
+
+    # Шум как «речь»: энергетический источник событий смотрит на RMS. Тишины
+    # в хвосте заведомо больше, чем vad_redemption_s, — иначе реплику закрыл бы
+    # только flush на остановке, и замер потерял бы смысл.
+    rng = np.random.default_rng(7)
+    block_s, blocks_fed = 0.02, 0
+    started = time.monotonic()
+    speech_ended_at = None
+    for amplitude, duration in ((0.0, 0.3), (0.3, 1.0), (0.0, 1.4)):
+        for _ in range(int(duration / block_s)):
+            samples = rng.standard_normal(int(block_s * SR)) * amplitude
+            ring.append(samples.astype(np.float32))
+            blocks_fed += 1
+            time.sleep(max(0.0, started + blocks_fed * block_s - time.monotonic()))
+        if amplitude:
+            speech_ended_at = time.monotonic()
+
+    deadline = time.monotonic() + 5.0
+    while not arrivals and time.monotonic() < deadline:
+        time.sleep(0.01)
+    stop.set()
+    chunker.join(5.0)
+    worker.join(5.0)
+
+    assert arrivals, "реплика так и не доехала до транскрипта за отведённое время"
+    latency = arrivals[0] - speech_ended_at
+    assert latency >= 0.4, f"сегмент выдан через {latency:.2f} c — раньше, чем VAD мог закрыть реплику"
+    assert latency <= 3.0, f"задержка конвейера {latency:.2f} c — что-то заметно тормозит"
+
+
 # ------------------------------------------------- движок + отчёт целиком
 
 def test_engine_cycles_and_report(tmp_path):

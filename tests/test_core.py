@@ -231,6 +231,52 @@ def test_stream_timestamps_do_not_drift_over_many_feeds():
     assert chunks == sorted(chunks, key=lambda c: c.t0)
 
 
+def test_stream_is_sample_exact():
+    """Строгая версия проверки стыков: ни один сэмпл не отдан дважды и ни один
+    сэмпл речи не потерян.
+
+    Проверяется на шуме с огибающей — каждый сэмпл уникален, поэтому содержимое
+    чанка можно сверить с источником точным равенством, а не «примерно по
+    длительности». Блоки подаются рваными (вплоть до одного сэмпла), чтобы
+    задеть придержанный хвост неполного кадра VAD. `max_chunk_s` мал, а один
+    участок речи длинный — значит, обязательно случится принудительный разрез,
+    ради которого и заведён `_emitted_through`.
+    """
+    rng = np.random.default_rng(1234)
+    spans = [("-", 1.0), ("v", 2.0), ("-", 1.2), ("v", 9.0), ("-", 1.2), ("v", 1.5), ("-", 1.5)]
+    parts, speech_spans, pos = [], [], 0
+    for kind, dur in spans:
+        n = int(dur * SR)
+        parts.append((rng.standard_normal(n) * (0.3 if kind == "v" else 0.0)).astype(np.float32))
+        if kind == "v":
+            speech_spans.append((pos, pos + n))
+        pos += n
+    src = np.concatenate(parts)
+
+    asm = make_stream_assembler(max_chunk_s=3.0)
+    chunks, i = [], 0
+    for step in [3000, 512, 7777, 1, 4096, 999] * 200:
+        if i >= len(src):
+            break
+        chunks.extend(asm.feed(src[i : i + step]))
+        i += step
+    tail = asm.flush()
+    if tail is not None:
+        chunks.append(tail)
+    assert len(chunks) > 3, "длинный монолог обязан был порезаться на несколько чанков"
+
+    coverage = np.zeros(len(src), dtype=np.int32)
+    for ch in chunks:
+        a, b = round(ch.t0 * SR), round(ch.t1 * SR)
+        # t0/t1 честно описывают то, что лежит внутри чанка.
+        assert np.array_equal(ch.audio, src[a:b]), f"чанк {ch.t0:.2f}–{ch.t1:.2f} не совпал с источником"
+        coverage[a:b] += 1
+
+    assert coverage.max() <= 1, "какой-то сэмпл отдан в ASR дважды — слова задвоятся"
+    for start, end in speech_spans:
+        assert coverage[start:end].all(), f"потеряна речь на {start / SR:.2f}–{end / SR:.2f} c"
+
+
 def test_stream_flush_returns_tail():
     asm = make_stream_assembler()
     assert feed_blocks(asm, np.concatenate([silence(0.5), tone(1.5)])) == []
