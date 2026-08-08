@@ -66,7 +66,8 @@ python -m tools.simulate --guide examples/guide.txt --transcript examples/interv
 
 | # | Шаги | Ожидается |
 |---|---|---|
-| I1 | Чистая установка по README (venv, requirements-<ОС>) | без ошибок pip; на Win подтянулись nvidia-пакеты |
+| I1 | Чистая установка: `python install.py` в свежем клоне | venv создан, pip без ошибок, на Win подтянулись nvidia-пакеты, веса ASR скачаны, проверки Ollama и кабеля отработали |
+| I1b | Повторный запуск `install.py` в уже настроенном каталоге | переиспользует venv, не падает, обновляет зависимости |
 | I2 | `python -m app.main` без Ollama | окно 600×400 поверх других окон; в «Настройке» внятная ошибка «Ollama не отвечает… Запустите…» |
 | I3 | Запустить Ollama без модели → ⟳ | «Модель не найдена. Выполните: ollama pull qwen3:8b» |
 | I4 | `ollama pull qwen3:8b` → ⟳ | зелёное «✓ Ollama …, модель qwen3:8b» |

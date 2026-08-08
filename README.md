@@ -51,35 +51,31 @@ ASR (Parakeet или Whisper) и LLM (Ollama) крутятся на вашей �
 
 ### 1. Python-окружение
 
-Быстрый путь — скрипт установки (создаёт `.venv`, ставит зависимости под вашу ОС
-и проверяет Ollama и виртуальный аудиокабель):
+Один скрипт на все платформы: создаёт `.venv`, ставит зависимости под вашу ОС,
+качает веса ASR и проверяет Ollama с виртуальным аудиокабелем.
 
 ```bash
-./setup.sh                                              # macOS / Linux
-powershell -ExecutionPolicy Bypass -File .\setup.ps1    # Windows
+python3 install.py     # macOS / Linux
+python install.py      # Windows
 ```
+
+Полезные флаги: `--no-model` (не качать веса сейчас), `--venv ПУТЬ`.
+Повторный запуск переиспользует существующее окружение, так что скриптом же
+удобно доставлять обновления зависимостей.
 
 Вручную то же самое:
 
 ```bash
 python3 -m venv .venv
+source .venv/bin/activate            # Windows: .venv\Scripts\Activate.ps1
+pip install -r requirements-macos.txt    # или -windows.txt / -common.txt (Linux)
+python -m tools.fetch_asr_model
 ```
 
-macOS:
-```bash
-source .venv/bin/activate
-pip install -r requirements-macos.txt
-```
-
-Windows (PowerShell):
-```powershell
-.venv\Scripts\Activate.ps1
-pip install -r requirements-windows.txt
-```
-
-На Windows нужен свежий драйвер NVIDIA (CUDA Toolkit ставить не нужно — cuBLAS/cuDNN
-приезжают pip-пакетами, приложение само подключает их DLL). Если CUDA недоступна,
-приложение автоматически откатится на CPU (медленнее).
+На Windows свежий драйвер NVIDIA нужен, только если вы переключитесь на Whisper
+(`asr.backend: faster`) — Parakeet по умолчанию работает на CPU. CUDA Toolkit
+ставить не нужно: cuBLAS/cuDNN приезжают pip-пакетами, приложение само подключает
+их DLL. Если CUDA недоступна, Whisper откатится на CPU.
 
 ### 2. Ollama и модель
 
@@ -212,6 +208,24 @@ VRAM вообще** — она целиком достаётся LLM. Так ч�
 `onnxruntime`, которую тянет faster-whisper. Если всё же переключаетесь на Whisper
 (`asr.backend: faster`), прежняя лестница в силе: `asr.compute_type: int8_float16` →
 `llm.num_ctx: 6144` → `llm.model: qwen3:4b-instruct-2507` → `asr.backend: faster-cpu`.
+
+### Apple Silicon
+
+Всё работает без отдельной настройки, но **Metal под Parakeet сейчас не задействован**:
+onnx-asr гоняет модель на CPU. Это всё равно кратно быстрее Whisper, однако на Mac
+остаётся запас, который пока не выбран. Три варианта, по возрастанию усилий:
+
+1. Как есть — Parakeet на CPU. Ядра M-серии быстрые, для реплик в несколько секунд
+   этого достаточно.
+2. Попробовать CoreML: `"asr": { "providers": ["CoreMLExecutionProvider", "CPUExecutionProvider"] }`.
+   onnxruntime такой провайдер поддерживает, но выигрыш зависит от того, какие слои
+   модели на него лягут — обязательно сравните `tools/bench_asr.py` до и после.
+3. `mlx-whisper` никуда не делся: `asr.backend: mlx` вернёт прежнее поведение
+   (и словарь терминов, которого у Parakeet нет).
+
+Полноценный путь — отдельный бэкенд на `parakeet-mlx` (именно так это сделано в
+stenoai): та же модель, но через Metal. Это добавление одного класса и ветки в
+`asr/factory.py`, см. «Точки расширения» в [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 ## Проверка без интервью
 
