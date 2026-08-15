@@ -1,11 +1,12 @@
-"""Silero VAD v5 через onnxruntime — покадровая инференция для потокового VAD.
+"""Silero VAD v5 through onnxruntime — frame-by-frame inference for the streaming VAD.
 
-Почему не `faster_whisper.vad`, откуда Silero берёт `vad.py`: оттуда доступен
-только батчевый `get_speech_timestamps` по готовому буферу, а машине состояний
-нужна вероятность на каждый кадр по мере поступления аудио. Модель (~2.3 МБ,
-MIT) лежит рядом в `data/`, onnxruntime и так есть в окружении.
+Why not `faster_whisper.vad`, where `vad.py` gets its Silero from: only the batch
+`get_speech_timestamps` over a finished buffer is available there, while the
+state machine needs a probability per frame as the audio arrives. The model
+(~2.3 MB, MIT) sits next door in `data/`, and onnxruntime is in the environment
+anyway.
 
-Происхождение файла `data/silero_vad.onnx`:
+Provenance of the file `data/silero_vad.onnx`:
 https://github.com/snakers4/silero-vad -> `src/silero_vad/data/silero_vad.onnx`
 sha256 1a153a22f4509e292a94e67d6f9b85e8deb25b4988682b7e174c65279d8788e3
 """
@@ -22,10 +23,11 @@ log = logging.getLogger("ilh.vad")
 
 MODEL_PATH = Path(__file__).parent / "data" / "silero_vad.onnx"
 
-# Перед каждым кадром модель v5 ждёт хвостовые сэмплы предыдущего — так её
-# свёрточный вход видит непрерывный сигнал на стыке кадров. Ровно это делает
-# и официальная обвязка silero-vad. Стоит один np.concatenate на кадр, так что
-# отступать от эталонного поведения ради экономии смысла нет.
+# Before each frame the v5 model expects the trailing samples of the previous
+# one — that way its convolutional input sees a continuous signal across the
+# frame seam. This is exactly what the official silero-vad wrapper does. It costs
+# one np.concatenate per frame, so departing from the reference behaviour to save
+# that is pointless.
 CONTEXT_SAMPLES = 64
 
 
@@ -36,10 +38,10 @@ class SileroStreamProcessor(_FramedProcessor):
 
         path = Path(model_path) if model_path else MODEL_PATH
         if not path.exists():
-            raise FileNotFoundError(f"Модель Silero VAD не найдена: {path}")
+            raise FileNotFoundError(f"The Silero VAD model was not found: {path}")
         opts = ort.SessionOptions()
         opts.log_severity_level = 3
-        # Граф крошечный: любой ускоритель тут дороже самого вычисления.
+        # The graph is tiny: any accelerator here costs more than the computation.
         self._sess = ort.InferenceSession(str(path), opts, providers=["CPUExecutionProvider"])
         self._sr = np.array(SAMPLE_RATE, dtype=np.int64)
         self._reset_model_state()

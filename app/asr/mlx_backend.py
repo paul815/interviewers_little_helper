@@ -1,4 +1,4 @@
-"""mlx-whisper: ускорение Metal на Apple Silicon."""
+"""mlx-whisper: Metal acceleration on Apple Silicon."""
 from __future__ import annotations
 
 import logging
@@ -21,12 +21,12 @@ class MLXWhisperBackend(ASRBackend):
         import mlx_whisper
 
         self._mlx_whisper = mlx_whisper
-        log.info("Загружаю mlx-whisper %s…", self.cfg.mlx_model)
-        # Прогрев: форсирует скачивание и компиляцию модели.
+        log.info("Loading mlx-whisper %s…", self.cfg.mlx_model)
+        # Warm-up: forces the model to be downloaded and compiled.
         mlx_whisper.transcribe(
             np.zeros(1600, dtype=np.float32), path_or_hf_repo=self.cfg.mlx_model
         )
-        log.info("mlx-whisper готов")
+        log.info("mlx-whisper is ready")
 
     def transcribe(self, audio: np.ndarray) -> ASRResult:
         result = self._mlx_whisper.transcribe(

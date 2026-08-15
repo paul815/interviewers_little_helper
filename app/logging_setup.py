@@ -1,9 +1,8 @@
-"""Логирование: консоль + файл logs/app.log. Никакой внешней телеметрии."""
+"""Logging: the console plus the file logs/app.log. No external telemetry."""
 from __future__ import annotations
 
 import logging
 import logging.handlers
-from pathlib import Path
 
 from .config import ROOT
 
@@ -32,8 +31,8 @@ def configure(level: str = "INFO") -> None:
         )
         fileh.setFormatter(fmt)
         root.addHandler(fileh)
-    except OSError as e:  # файл-лог не критичен
-        root.warning("Файловый лог недоступен: %s", e)
+    except OSError as e:  # the file log is not critical
+        root.warning("The file log is unavailable: %s", e)
 
     logging.getLogger("httpx").setLevel(logging.WARNING)
     logging.getLogger("httpcore").setLevel(logging.WARNING)

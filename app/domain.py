@@ -1,4 +1,4 @@
-"""Общие доменные типы: говорящие, аудио-чанки, сегменты транскрипта."""
+"""Shared domain types: speakers, audio chunks, transcript segments."""
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -8,18 +8,18 @@ from enum import Enum
 import numpy as np
 
 
-class Speaker(str, Enum):
+class Speaker(str, Enum):  # noqa: UP042 — StrEnum would change the result of str()
     INTERVIEWER = "INTERVIEWER"
     RESPONDENT = "RESPONDENT"
 
 
-SPEAKER_SHORT_RU = {Speaker.INTERVIEWER: "И", Speaker.RESPONDENT: "Р"}
-SPEAKER_FULL_RU = {Speaker.INTERVIEWER: "Интервьюер", Speaker.RESPONDENT: "Респондент"}
+SPEAKER_SHORT = {Speaker.INTERVIEWER: "I", Speaker.RESPONDENT: "R"}
+SPEAKER_FULL = {Speaker.INTERVIEWER: "Interviewer", Speaker.RESPONDENT: "Respondent"}
 
 
 @dataclass
 class AudioChunk:
-    """Кусок речи одного говорящего; t0/t1 — секунды от старта сессии."""
+    """A piece of speech from one speaker; t0/t1 are seconds from session start."""
 
     speaker: Speaker
     audio: np.ndarray  # float32 mono, 16 kHz
@@ -29,7 +29,7 @@ class AudioChunk:
 
 @dataclass
 class Segment:
-    """Распознанный сегмент транскрипта."""
+    """A recognised transcript segment."""
 
     id: int
     speaker: Speaker

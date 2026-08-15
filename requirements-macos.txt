@@ -1,3 +1,6 @@
 -r requirements-common.txt
-# ASR с ускорением Metal на Apple Silicon
-mlx-whisper>=0.4 ; platform_machine == 'arm64'
+# ASR with Metal acceleration on Apple Silicon.
+# NOTE: the version is pinned blind — this package cannot be built or run on the
+# Windows machine the RC was prepared on. Verify it on Apple Silicon before
+# tagging (docs/TESTING.md section 4, the from-scratch installation block).
+mlx-whisper==0.4.3 ; platform_machine == 'arm64'

@@ -1,0 +1,50 @@
+# Tool configuration. No package is built from here: the application is installed
+# by setup.py into a .venv next to the repository (see the README).
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+extend-exclude = [".venv", "examples"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "S"]
+# The prose uses typographic dashes and guillemets, and a few identifiers still
+# carry Cyrillic character classes: the "ambiguous unicode" rules fire on every
+# other line here and carry no benefit.
+ignore = ["RUF001", "RUF002", "RUF003"]
+
+[tool.ruff.lint.per-file-ignores]
+# Prompt text must not be wrapped: a line break would travel into the model request.
+"app/coverage/prompts.py" = ["E501"]
+"tests/*" = ["S101"]           # assert is the test
+"tools/*" = ["S603", "S607"]   # spawning child processes here is the point
+"setup.py" = ["S603", "S607"]
+
+[tool.coverage.run]
+source = ["app"]
+omit = [
+    # These need hardware, native libraries or the network — unreachable in CI.
+    "app/asr/faster_backend.py",
+    "app/asr/mlx_backend.py",
+    "app/asr/parakeet_backend.py",
+    "app/audio/capture.py",
+    "app/audio/loopback.py",
+    "app/audio/silero_stream.py",
+    "app/main.py",
+]
+
+[tool.coverage.report]
+show_missing = true
+# Measured at 82% on RC 0.2.0; two points of slack for platform differences.
+# The bulk of what is left uncovered is app/server/controller.py: the session
+# lifecycle cannot be reproduced without audio devices.
+fail_under = 80
+exclude_lines = [
+    "pragma: no cover",
+    "if TYPE_CHECKING:",
+    "raise NotImplementedError",
+]

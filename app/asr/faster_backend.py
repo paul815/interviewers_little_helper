@@ -1,4 +1,4 @@
-"""faster-whisper (CTranslate2): CUDA на Windows/NVIDIA, int8 на CPU — фолбэк везде."""
+"""faster-whisper (CTranslate2): CUDA on Windows/NVIDIA, int8 on CPU — the fallback everywhere."""
 from __future__ import annotations
 
 import logging
@@ -15,12 +15,12 @@ log = logging.getLogger("ilh.asr")
 
 
 def _add_nvidia_dll_dirs() -> None:
-    """На Windows cuBLAS/cuDNN ставятся pip-пакетами nvidia-*; их DLL-каталоги
-    нужно явно добавить в путь поиска до загрузки CTranslate2."""
+    """On Windows, cuBLAS/cuDNN come from the nvidia-* pip packages; their DLL
+    directories must be added to the search path explicitly before CTranslate2 loads."""
     if sys.platform != "win32":
         return
     try:
-        import nvidia  # namespace-пакет
+        import nvidia  # a namespace package
 
         for base in nvidia.__path__:
             for sub in Path(base).iterdir():
@@ -28,7 +28,7 @@ def _add_nvidia_dll_dirs() -> None:
                     if dll_dir.is_dir():
                         os.add_dll_directory(str(dll_dir))
     except Exception as e:
-        log.debug("nvidia pip-пакеты не найдены: %s", e)
+        log.debug("The nvidia pip packages were not found: %s", e)
 
 
 class FasterWhisperBackend(ASRBackend):
@@ -46,25 +46,29 @@ class FasterWhisperBackend(ASRBackend):
         _add_nvidia_dll_dirs()
         attempts = []
         if self.device_pref in ("auto", "cuda"):
-            attempts.append(("cuda", self.cfg.compute_type if self.cfg.compute_type != "auto" else "float16"))
+            attempts.append(
+                ("cuda", self.cfg.compute_type if self.cfg.compute_type != "auto" else "float16")
+            )
         if self.device_pref in ("auto", "cpu"):
-            attempts.append(("cpu", self.cfg.compute_type if self.cfg.compute_type != "auto" else "int8"))
+            attempts.append(
+                ("cpu", self.cfg.compute_type if self.cfg.compute_type != "auto" else "int8")
+            )
 
         last_err: Exception | None = None
         for device, compute in attempts:
             try:
-                log.info("Загружаю faster-whisper %s (%s, %s)…", self.cfg.model, device, compute)
+                log.info("Loading faster-whisper %s (%s, %s)…", self.cfg.model, device, compute)
                 self.model = WhisperModel(self.cfg.model, device=device, compute_type=compute)
-                # Прогрев и проверка, что device реально работает.
+                # Warm-up, and a check that the device actually works.
                 list(self.model.transcribe(np.zeros(1600, dtype=np.float32), beam_size=1)[0])
                 self.device, self.compute_type = device, compute
-                log.info("faster-whisper готов: %s / %s", device, compute)
+                log.info("faster-whisper is ready: %s / %s", device, compute)
                 return
             except Exception as e:
                 last_err = e
-                log.warning("faster-whisper на %s не поднялся: %s", device, e)
+                log.warning("faster-whisper did not come up on %s: %s", device, e)
                 self.model = None
-        raise RuntimeError(f"Не удалось загрузить faster-whisper: {last_err}")
+        raise RuntimeError(f"Could not load faster-whisper: {last_err}")
 
     def transcribe(self, audio: np.ndarray) -> ASRResult:
         segments, info = self.model.transcribe(
@@ -74,7 +78,7 @@ class FasterWhisperBackend(ASRBackend):
             temperature=0.0,
             condition_on_previous_text=False,
             initial_prompt=self.cfg.vocabulary or None,
-            vad_filter=False,  # VAD уже отработал в чанкере
+            vad_filter=False,  # VAD already did its work in the chunker
             without_timestamps=True,
         )
         parts, weights, probs = [], [], []

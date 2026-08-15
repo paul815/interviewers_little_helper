@@ -1,4 +1,4 @@
-"""Единственный ASR-воркер: сериализует доступ обоих каналов к одной модели."""
+"""The single ASR worker: serialises both channels' access to one model."""
 from __future__ import annotations
 
 import logging
@@ -6,7 +6,7 @@ import queue
 import re
 import threading
 import time
-from typing import Callable
+from collections.abc import Callable
 
 from ..config import ASRConfig
 from ..domain import AudioChunk
@@ -25,7 +25,7 @@ class ASRWorker(threading.Thread):
     def __init__(
         self,
         backend: ASRBackend,
-        in_queue: "queue.Queue[AudioChunk]",
+        in_queue: queue.Queue[AudioChunk],
         on_segment: SegmentCallback,
         on_status: StatusCallback,
         cfg: ASRConfig,
@@ -43,22 +43,22 @@ class ASRWorker(threading.Thread):
 
     def run(self) -> None:
         try:
-            self.on_status("asr_loading", f"Загрузка модели распознавания ({self.backend.name})…")
+            self.on_status("asr_loading", f"Loading the recognition model ({self.backend.name})…")
             t = time.monotonic()
             self.backend.load()
             self.ready = True
-            message = f"ASR готов: {self.backend.describe()} ({time.monotonic() - t:.0f} c)"
+            message = f"ASR ready: {self.backend.describe()} ({time.monotonic() - t:.0f} s)"
             warnings = self.backend.warnings()
             if warnings:
-                message += " — внимание: " + "; ".join(warnings)
+                message += " — note: " + "; ".join(warnings)
             self.on_status("asr_ready", message)
         except Exception as e:
             self.load_error = str(e)
-            log.exception("Не удалось загрузить ASR-модель")
-            self.on_status("asr_error", f"Ошибка загрузки ASR: {e}")
+            log.exception("Could not load the ASR model")
+            self.on_status("asr_error", f"ASR failed to load: {e}")
             return
 
-        # После сигнала стоп дорабатываем очередь до конца (финальные чанки).
+        # After the stop signal we drain the queue to the end (the final chunks).
         while not (self.stop_event.is_set() and self.in_queue.empty()):
             try:
                 chunk = self.in_queue.get(timeout=0.25)
@@ -69,7 +69,7 @@ class ASRWorker(threading.Thread):
     def _process(self, chunk: AudioChunk) -> None:
         backlog = self.in_queue.qsize()
         if backlog > 20:
-            log.warning("Очередь ASR растёт: %d чанков в ожидании", backlog)
+            log.warning("The ASR queue is growing: %d chunks waiting", backlog)
         try:
             t = time.monotonic()
             result = self.backend.transcribe(chunk.audio)
@@ -81,14 +81,14 @@ class ASRWorker(threading.Thread):
                 result.no_speech_prob is not None
                 and result.no_speech_prob > self.cfg.drop_no_speech_prob
             ):
-                log.debug("Отброшен вероятный не-речевой сегмент (%.2f): %r",
+                log.debug("Dropped a likely non-speech segment (%.2f): %r",
                           result.no_speech_prob, text[:60])
                 return
             log.debug(
-                "%s %.1f–%.1f c распознан за %.1f c: %r",
+                "%s %.1f–%.1f s recognised in %.1f s: %r",
                 chunk.speaker.value, chunk.t0, chunk.t1, elapsed, text[:80],
             )
             self.on_segment(chunk, text, result.language)
         except Exception:
-            log.exception("Ошибка транскрипции чанка %s %.1f–%.1f c — пропускаю",
+            log.exception("Error transcribing chunk %s %.1f–%.1f s — skipping it",
                           chunk.speaker.value, chunk.t0, chunk.t1)

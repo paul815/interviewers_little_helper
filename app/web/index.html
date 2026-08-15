@@ -1,103 +1,299 @@
 <!DOCTYPE html>
-<html lang="ru">
+<html lang="en">
 <head>
 <meta charset="utf-8">
 <title>Interview Helper</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <link rel="icon" href="data:,">
 <link rel="stylesheet" href="/app.css">
+<script>
+  /* Ahead of app.js: if the theme was picked by hand, apply it before the first
+     paint, otherwise the window flashes the wrong one. No choice made — touch
+     nothing, the prefers-color-scheme media query takes over. */
+  try {
+    const t = localStorage.getItem("ilh_theme");
+    if (t === "light" || t === "dark") document.documentElement.dataset.theme = t;
+  } catch (e) { /* localStorage is closed — we survive on the system theme */ }
+</script>
 </head>
 <body>
+
+<!-- ==================== start screen: the project list ==================== -->
+<div id="screen-start" class="screen">
+  <header class="start-bar">
+    <span class="brand">Interviewer's Little Helper</span>
+    <span class="brand-sub">all projects</span>
+    <span class="grow"></span>
+    <button id="btn-settings" class="btn">⚙ Settings</button>
+  </header>
+
+  <div id="ready-line" class="ready"></div>
+
+  <div class="start-actions">
+    <button id="btn-proj-new" class="btn primary">＋ New project</button>
+    <button id="btn-no-project" class="btn"
+      title="A one-off interview: the recording goes into the shared sessions folder">Record without a project</button>
+    <input id="proj-search" type="text" class="search" placeholder="Search projects">
+  </div>
+
+  <div id="proj-new" class="new-proj hidden">
+    <input id="proj-title" type="text" placeholder="Name: «B2B onboarding, spring»">
+    <button id="btn-proj-create" class="btn primary">Create</button>
+    <button id="btn-proj-cancel" class="btn" title="Cancel">✕</button>
+  </div>
+  <div id="start-msg"></div>
+
+  <div id="start-count" class="sec-title"></div>
+  <div id="project-grid" class="scroll grid"></div>
+</div>
+
+<!-- ==================== work screen: a single project ==================== -->
+<div id="screen-work" class="screen hidden">
 <header id="topbar">
+  <button id="btn-back" class="btn small" title="Back to the project list">←</button>
+  <span id="work-title" class="work-title"></span>
   <span id="status-dot" class="dot idle"></span>
-  <span id="status-text">Загрузка…</span>
-  <span id="timer" title="До следующего анализа">–:––</span>
-  <button id="btn-flag" class="btn small hidden" title="Отметить момент (клавиша F)">🚩</button>
-  <button id="btn-analyze" class="btn small" disabled title="Запустить анализ вне расписания">Анализ</button>
-  <button id="btn-startstop" class="btn small primary" disabled>Старт</button>
+  <span id="status-text">Loading…</span>
+  <span id="timer" title="Until the next analysis">–:––</span>
+  <button id="btn-flag" class="btn small hidden" title="Flag this moment (F5)">🚩</button>
+  <button id="btn-analyze" class="btn small" disabled title="Run the analysis off schedule">Analyze</button>
+  <button id="btn-app-settings" class="btn small"
+    title="Application settings: theme, devices, models">⚙</button>
+  <button id="btn-startstop" class="btn small primary" disabled>Start</button>
 </header>
 
 <nav id="tabs">
-  <button data-tab="recs" class="tab active">Подсказки</button>
-  <button data-tab="topics" class="tab">Темы <span id="cov-counter"></span></button>
-  <button data-tab="transcript" class="tab">Транскрипт</button>
-  <button data-tab="setup" class="tab">Настройка</button>
+  <button data-tab="live" class="tab active">Interview</button>
+  <button data-tab="topics" class="tab">Topics <span id="cov-counter"></span></button>
+  <button data-tab="transcript" class="tab">Transcript</button>
+  <button data-tab="project" class="tab">Project</button>
+  <button data-tab="setup" class="tab">Project settings</button>
 </nav>
 
 <main>
-  <section id="tab-recs" class="pane active">
-    <div class="scroll">
-      <div id="pace-line" class="pace hidden"></div>
-      <div id="probes-list"></div>
-      <div id="recs-list"></div>
+  <section id="tab-live" class="pane active">
+    <div class="live">
+      <div class="live-main">
+        <div class="live-bar">
+          <span id="live-title" class="grow dim"></span>
+          <span id="live-el" class="live-el"></span>
+          <button id="btn-gfs-m" class="btn tiny" title="Smaller">A−</button>
+          <button id="btn-gfs-p" class="btn tiny" title="Larger">A+</button>
+        </div>
+        <div id="live-guide" class="scroll live-guide"></div>
+      </div>
+      <aside class="live-side">
+        <div class="side-box" id="rec-box">
+          <div class="side-head">Hints <span id="rec-n" class="side-n">0</span>
+            <span class="grow"></span>
+            <span id="rec-fresh" class="rec-fresh hidden"></span>
+          </div>
+          <div class="scroll side-list">
+            <div id="pace-line" class="pace hidden"></div>
+            <div id="rec-live"></div>
+          </div>
+        </div>
+        <div class="side-box">
+          <div class="side-head">Comments <span id="cmt-n" class="side-n">0</span></div>
+          <div id="cmt-list" class="scroll side-list"></div>
+          <div class="side-foot">
+            <div id="cmt-anchor" class="anchor-hint"></div>
+            <textarea id="cmt-text" rows="2"
+              placeholder="Comment… ⏎ — save, Shift+⏎ — new line"></textarea>
+          </div>
+        </div>
+        <div class="side-box">
+          <div class="side-head">Ask as well <span id="q-n" class="side-n">0</span></div>
+          <div id="q-list" class="scroll side-list"></div>
+          <div class="side-foot">
+            <textarea id="q-text" rows="2" placeholder="A question worth asking… ⏎"></textarea>
+          </div>
+        </div>
+      </aside>
     </div>
   </section>
 
   <section id="tab-topics" class="pane">
-    <div id="topics-list" class="scroll"></div>
+    <div id="topics-list" class="scroll topics"></div>
   </section>
 
   <section id="tab-transcript" class="pane">
-    <div id="transcript-list" class="scroll"></div>
+    <div id="transcript-list" class="scroll narrow"></div>
   </section>
 
+  <section id="tab-project" class="pane">
+    <div class="scroll cols">
+      <div class="col">
+        <div class="row">
+          <span class="lbl">Project</span>
+          <span class="grow"></span>
+          <button id="btn-proj-open" class="btn tiny" title="Open the project folder">📂</button>
+        </div>
+        <div id="proj-head"></div>
+
+        <div id="proj-sessions"></div>
+      </div>
+      <div class="col">
+        <div id="proj-coverage"></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Project settings: only what belongs to this series of interviews. Everything
+       that belongs to the machine — theme, devices, models — lives in the ⚙ dialog. -->
   <section id="tab-setup" class="pane">
-    <div class="scroll setup">
+    <div class="scroll setup cols">
+      <div class="col">
+        <div class="row">
+          <span class="lbl">Interview length</span>
+          <span class="grow"></span>
+          <input id="duration" type="number" min="10" max="240" step="5" value="60"> <span class="dim">min</span>
+        </div>
+        <div class="hint">The pace on the interview screen is measured against it.</div>
+
+        <div class="row"><span class="lbl">Extra instructions for the analysis</span>
+          <span id="proj-instr-state" class="grow dim"></span></div>
+        <textarea id="proj-instr" rows="6"
+          placeholder="What to keep in mind in this study specifically: context, what to watch for, what not to suggest…"></textarea>
+        <div class="hint">Appended to the analysis prompts for every interview in the project.
+          Saved when you leave the field. The prompts themselves are in ⚙ — they are
+          shared by every project.</div>
+
+        <div class="row"><span class="lbl">Term vocabulary for recognition</span></div>
+        <input id="vocab" type="text"
+          placeholder="product names, brands, jargon — comma-separated">
+        <div class="hint">A hint for the recogniser: these words will be recognised more accurately.</div>
+      </div>
+
+      <div class="col">
+        <div class="row"><span class="lbl">Guide library</span></div>
+        <div class="librow">
+          <select id="sel-guide-lib"><option value="">— empty —</option></select>
+          <button id="btn-lib-load" class="btn tiny">Load</button>
+          <button id="btn-lib-del" class="btn tiny" title="Delete the selected one">✕</button>
+        </div>
+
+        <div class="row"><span class="lbl">Research guide</span><span id="guide-badge" class="grow dim"></span></div>
+        <div id="guide-editor">
+          <textarea id="guide-text" rows="14"
+            placeholder="Paste the guide text in free form: sections and questions…"></textarea>
+          <button id="btn-parse" class="btn">Parse the guide</button>
+        </div>
+        <div id="guide-preview" class="hidden">
+          <div id="guide-tree"></div>
+          <div class="btnrow">
+            <button id="btn-confirm-guide" class="btn primary">Use this structure</button>
+            <button id="btn-edit-guide" class="btn">← Edit the text</button>
+          </div>
+        </div>
+
+        <div id="setup-msg"></div>
+      </div>
+    </div>
+  </section>
+</main>
+</div>
+
+<!-- ==================== application settings: the machine, not the study ==================== -->
+<div id="app-settings" class="modal hidden">
+  <div class="sheet">
+    <div class="sheet-head">
+      <span class="sheet-title">Application settings</span>
+      <span class="sheet-sub">Shared by every project</span>
+      <span class="grow"></span>
+      <button id="btn-app-close" class="btn small">Done</button>
+    </div>
+    <div class="sheet-body">
       <div class="row">
-        <span class="lbl">LLM</span>
-        <span id="llm-status" class="grow">проверка…</span>
-        <button id="btn-llm-refresh" class="btn tiny" title="Проверить снова">⟳</button>
+        <span class="lbl">Theme</span>
+        <span class="grow"></span>
+        <div id="theme-switch" class="seg">
+          <button class="btn tiny" data-theme="system" title="Follow the system">System</button>
+          <button class="btn tiny" data-theme="light">Light</button>
+          <button class="btn tiny" data-theme="dark">Dark</button>
+        </div>
       </div>
 
       <div class="row">
-        <span class="lbl">Микрофон → интервьюер</span>
+        <span class="lbl">LLM</span>
+        <span id="llm-status" class="grow">checking…</span>
+        <button id="btn-llm-refresh" class="btn tiny" title="Check again">⟳</button>
+      </div>
+
+      <div class="row">
+        <span class="lbl">Models</span>
+        <span id="models-status" class="grow dim">checking…</span>
+        <button id="btn-models" class="btn tiny" title="Check and download the missing models">⤓</button>
+      </div>
+
+      <div class="row">
+        <span class="lbl">Microphone → interviewer</span>
         <span class="grow"></span>
-        <button id="btn-dev-refresh" class="btn tiny" title="Обновить список устройств">⟳</button>
+        <button id="btn-dev-refresh" class="btn tiny" title="Refresh the device list">⟳</button>
       </div>
       <select id="sel-mic"></select>
       <div class="vu"><div id="vu-mic" class="vu-fill"></div></div>
 
-      <div class="row"><span class="lbl">Системный звук (BlackHole / VB-Cable) → респондент</span></div>
+      <div class="row"><span id="sys-lbl" class="lbl">System audio → respondent</span></div>
       <select id="sel-sys"></select>
       <div class="vu"><div id="vu-sys" class="vu-fill"></div></div>
-      <div id="vu-hint" class="hint">Скажите фразу и включите звук в Zoom — обе полоски должны дёргаться.</div>
+      <div id="vu-hint" class="hint">Say something and let Zoom play sound — both bars should move.</div>
 
-      <div class="row">
-        <span class="lbl">Длительность интервью</span>
-        <span class="grow"></span>
-        <input id="duration" type="number" min="10" max="240" step="5" value="60"> <span class="dim">мин</span>
-      </div>
+      <div id="app-msg"></div>
 
-      <div class="row"><span class="lbl">Словарь терминов для распознавания</span></div>
-      <input id="vocab" type="text"
-        placeholder="названия продукта, бренды, жаргон — через запятую">
-      <div class="hint">Подсказка Whisper: эти слова будут распознаваться точнее.</div>
-
-      <div class="row"><span class="lbl">Библиотека гайдов</span></div>
-      <div class="librow">
-        <select id="sel-guide-lib"><option value="">— пусто —</option></select>
-        <button id="btn-lib-load" class="btn tiny">Загрузить</button>
-        <button id="btn-lib-del" class="btn tiny" title="Удалить выбранный">✕</button>
-      </div>
-
-      <div class="row"><span class="lbl">Гайд исследования</span><span id="guide-badge" class="grow dim"></span></div>
-      <div id="guide-editor">
-        <textarea id="guide-text" rows="6"
-          placeholder="Вставьте текст гайда в свободной форме: секции и вопросы…"></textarea>
-        <button id="btn-parse" class="btn">Распарсить гайд</button>
-      </div>
-      <div id="guide-preview" class="hidden">
-        <div id="guide-tree"></div>
-        <div class="btnrow">
-          <button id="btn-confirm-guide" class="btn primary">Использовать эту структуру</button>
-          <button id="btn-edit-guide" class="btn">← Править текст</button>
-        </div>
-      </div>
-
-      <div id="setup-msg"></div>
+      <details id="prompts-box">
+        <summary class="lbl">Analysis prompts</summary>
+        <div class="hint">What exactly the application asks the model. Shared by every
+          project — for a single study use «Extra instructions» in its settings.
+          Edits apply to the next session you start.</div>
+        <div id="prompts-list"></div>
+      </details>
     </div>
-  </section>
-</main>
+  </div>
+</div>
+
+<!-- ==================== a past interview: transcript plus the recording ==================== -->
+<div id="viewer" class="modal hidden">
+  <div class="sheet wide">
+    <div class="sheet-head">
+      <span class="sheet-title" id="viewer-title">Interview</span>
+      <span class="sheet-sub" id="viewer-sub"></span>
+      <span class="grow"></span>
+      <button id="btn-viewer-folder" class="btn small" title="Open the interview folder">📂</button>
+      <button id="btn-viewer-close" class="btn small">Close</button>
+    </div>
+    <div id="viewer-audio" class="viewer-audio">
+      <audio id="viewer-player" controls preload="metadata"></audio>
+      <div id="viewer-audio-note" class="hint"></div>
+    </div>
+    <div id="viewer-body" class="scroll viewer-body"></div>
+  </div>
+</div>
+
+<!-- ==================== "are you sure?" ==================== -->
+<div id="confirm" class="modal hidden">
+  <div class="sheet slim">
+    <div class="sheet-title" id="confirm-title"></div>
+    <div class="confirm-body" id="confirm-body"></div>
+    <div class="btnrow end">
+      <button id="btn-confirm-no" class="btn">Cancel</button>
+      <button id="btn-confirm-yes" class="btn danger">Delete</button>
+    </div>
+  </div>
+</div>
+
+<div id="wizard" class="hidden">
+  <div class="wiz">
+    <div class="wiz-title">The application is missing some models</div>
+    <div class="wiz-sub">Everything runs on this machine, so the files are downloaded once.
+      You can carry on without them, but there will be no hints and no transcript.</div>
+    <div id="wiz-items"></div>
+    <div class="btnrow">
+      <button id="btn-wiz-get" class="btn primary">Download</button>
+      <button id="btn-wiz-close" class="btn">Later</button>
+    </div>
+  </div>
+</div>
 
 <script src="/app.js"></script>
 </body>

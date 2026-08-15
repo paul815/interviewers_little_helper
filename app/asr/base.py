@@ -1,4 +1,4 @@
-"""Интерфейс ASR-бэкенда: чанк 16 kHz float32 -> текст."""
+"""The ASR backend interface: a 16 kHz float32 chunk -> text."""
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
@@ -19,7 +19,7 @@ class ASRBackend(ABC):
 
     @abstractmethod
     def load(self) -> None:
-        """Загрузка модели (медленно; вызывается в рабочем потоке)."""
+        """Load the model (slow; called on a worker thread)."""
 
     @abstractmethod
     def transcribe(self, audio: np.ndarray) -> ASRResult:
@@ -29,5 +29,5 @@ class ASRBackend(ABC):
         return self.name
 
     def warnings(self) -> list[str]:
-        """Что бэкенд не смог выполнить из настроек — показывается пользователю."""
+        """What the backend could not honour from the settings — shown to the user."""
         return []

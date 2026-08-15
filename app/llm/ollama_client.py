@@ -1,5 +1,5 @@
-"""Клиент локального Ollama: health-check, чат со структурированным JSON-выводом,
-устойчивый парсинг и повторный запрос при невалидном ответе."""
+"""Client for the local Ollama: health check, chat with structured JSON output,
+resilient parsing and a retry when the answer is invalid."""
 from __future__ import annotations
 
 import json
@@ -19,16 +19,16 @@ _FENCE_RE = re.compile(r"^```[a-zA-Z]*\s*|\s*```$", re.MULTILINE)
 
 
 class OllamaError(Exception):
-    """Ошибка с готовым для UI сообщением."""
+    """An error carrying a message that is ready for the UI."""
 
 
 def robust_json_parse(text: str) -> dict:
-    """Срезает <think>-блоки и markdown-ограждения, вырезает JSON-объект."""
+    """Strips <think> blocks and markdown fences, then cuts out the JSON object."""
     cleaned = _THINK_RE.sub("", text)
     cleaned = _FENCE_RE.sub("", cleaned).strip()
     start, end = cleaned.find("{"), cleaned.rfind("}")
     if start == -1 or end == -1 or end <= start:
-        raise ValueError("в ответе нет JSON-объекта")
+        raise ValueError("the response contains no JSON object")
     return json.loads(cleaned[start : end + 1])
 
 
@@ -49,7 +49,7 @@ class OllamaClient:
         self._supports_schema_format = True
 
     async def check(self) -> dict:
-        """Статус сервера и наличие модели; ошибки — в человекочитаемом виде."""
+        """Server status and model presence; errors in human-readable form."""
         result = {"ok": False, "server_up": False, "model_found": False,
                   "model": self.cfg.model, "version": None, "error": None}
         try:
@@ -68,22 +68,22 @@ class OllamaClient:
                 )
                 if not result["model_found"]:
                     result["error"] = (
-                        f"Модель «{want}» не найдена в Ollama. "
-                        f"Выполните: ollama pull {want}"
+                        f"Model «{want}» was not found in Ollama. "
+                        f"Run: ollama pull {want}"
                     )
         except (httpx.ConnectError, httpx.TimeoutException):
             result["error"] = (
-                f"Ollama не отвечает на {self.cfg.base_url}. "
-                "Запустите приложение Ollama (или `ollama serve`)."
+                f"Ollama is not answering at {self.cfg.base_url}. "
+                "Start the Ollama application (or `ollama serve`)."
             )
         except httpx.HTTPError as e:
-            result["error"] = f"Ошибка запроса к Ollama: {e}"
+            result["error"] = f"Error requesting Ollama: {e}"
         result["ok"] = result["server_up"] and result["model_found"]
         return result
 
     async def chat_json(self, system: str, user: str, schema: dict) -> tuple[dict, ChatMeta]:
-        """Один диалоговый вызов со строгим JSON-ответом. При невалидном JSON —
-        один повторный запрос с текстом ошибки."""
+        """One chat call with a strict JSON answer. On invalid JSON, one retry
+        that carries the error text."""
         messages = [
             {"role": "system", "content": system},
             {"role": "user", "content": user},
@@ -94,19 +94,19 @@ class OllamaClient:
         try:
             parsed = robust_json_parse(raw)
         except (ValueError, json.JSONDecodeError) as e:
-            log.warning("Невалидный JSON от LLM (%s) — повторяю запрос", e)
+            log.warning("Invalid JSON from the LLM (%s) — retrying the request", e)
             retried = True
             messages = messages + [
                 {"role": "assistant", "content": raw},
                 {"role": "user",
-                 "content": f"Твой ответ не является валидным JSON ({e}). "
-                            f"Верни ТОЛЬКО валидный JSON-объект по заданной схеме, без пояснений."},
+                 "content": f"Your answer is not valid JSON ({e}). Return ONLY a valid "
+                            f"JSON object matching the given schema, with no explanations."},
             ]
             raw, data = await self._chat_once(messages, schema)
             try:
                 parsed = robust_json_parse(raw)
             except (ValueError, json.JSONDecodeError) as e2:
-                raise OllamaError(f"LLM дважды вернула невалидный JSON: {e2}") from e2
+                raise OllamaError(f"The LLM returned invalid JSON twice: {e2}") from e2
 
         meta = ChatMeta(
             duration_s=time.monotonic() - started,
@@ -132,11 +132,11 @@ class OllamaClient:
             },
         }
         if self._supports_think_param:
-            payload["think"] = False  # для thinking-моделей (qwen3): JSON без размышлений
+            payload["think"] = False  # for thinking models (qwen3): JSON without the reasoning
 
         timeout = httpx.Timeout(self.cfg.request_timeout_s, connect=5.0)
         async with httpx.AsyncClient(timeout=timeout) as client:
-            for _ in range(3):  # даунгрейды для старых версий Ollama
+            for _ in range(3):  # downgrades for older Ollama versions
                 try:
                     resp = await client.post(f"{self.cfg.base_url}/api/chat", json=payload)
                     resp.raise_for_status()
@@ -144,28 +144,34 @@ class OllamaClient:
                     return data.get("message", {}).get("content", ""), data
                 except httpx.ConnectError as e:
                     raise OllamaError(
-                        f"Ollama не отвечает на {self.cfg.base_url}. Сервер запущен?"
+                        f"Ollama is not answering at {self.cfg.base_url}. Is the server running?"
                     ) from e
                 except httpx.TimeoutException as e:
                     raise OllamaError(
-                        f"Ollama не ответила за {self.cfg.request_timeout_s:.0f} c "
-                        "(модель перегружена или выгружена на CPU?)"
+                        f"Ollama did not answer within {self.cfg.request_timeout_s:.0f} s "
+                        "(is the model overloaded or offloaded to the CPU?)"
                     ) from e
                 except httpx.HTTPStatusError as e:
                     body = e.response.text[:500]
                     if e.response.status_code == 404 and "model" in body.lower():
                         raise OllamaError(
-                            f"Модель «{self.cfg.model}» не найдена. Выполните: ollama pull {self.cfg.model}"
+                            f"Model «{self.cfg.model}» was not found. "
+                            f"Run: ollama pull {self.cfg.model}"
                         ) from e
-                    if e.response.status_code == 400 and "think" in body.lower() and self._supports_think_param:
-                        log.info("Ollama не принимает параметр think — отключаю")
+                    if (e.response.status_code == 400 and "think" in body.lower()
+                            and self._supports_think_param):
+                        log.info("Ollama does not accept the think parameter — disabling it")
                         self._supports_think_param = False
                         payload.pop("think", None)
                         continue
-                    if e.response.status_code == 400 and "format" in body.lower() and self._supports_schema_format:
-                        log.info("Ollama не принимает JSON-схему в format — перехожу на format=json")
+                    if (e.response.status_code == 400 and "format" in body.lower()
+                            and self._supports_schema_format):
+                        log.info(
+                            "Ollama does not accept a JSON schema in format — "
+                            "falling back to format=json"
+                        )
                         self._supports_schema_format = False
                         payload["format"] = "json"
                         continue
-                    raise OllamaError(f"Ошибка Ollama {e.response.status_code}: {body}") from e
-        raise OllamaError("Ollama отклонила запрос после всех попыток")
+                    raise OllamaError(f"Ollama error {e.response.status_code}: {body}") from e
+        raise OllamaError("Ollama rejected the request after every attempt")

@@ -1,22 +1,23 @@
-"""Parakeet TDT v3 через onnx-asr — быстрый бэкенд по умолчанию.
+"""Parakeet TDT v3 through onnx-asr — the fast default backend.
 
-Whisper large-v3-turbo декодирует авторегрессионно и на реплике в несколько
-секунд стоит секунды же. Parakeet TDT 0.6B — примерно на порядок быстрее при
-сопоставимом качестве (на русском WER чуть хуже Whisper large-v3, в том же
-классе), и int8-версия уверенно работает на CPU, освобождая VRAM для LLM.
+Whisper large-v3-turbo decodes autoregressively and takes seconds over an
+utterance a few seconds long. Parakeet TDT 0.6B is roughly an order of magnitude
+faster at comparable quality (on Russian its WER is a little worse than Whisper
+large-v3, in the same class), and the int8 version copes comfortably on CPU,
+freeing the VRAM for the LLM.
 
-Отличия от Whisper, важные для вызывающего кода:
+The differences from Whisper that matter to the calling code:
 
-- нет conditioning промптом, поэтому `asr.vocabulary` с этим бэкендом не
-  работает — при непустом словаре предупреждаем в лог и в статус UI;
-- нет `no_speech_prob`: модель на тишине отдаёт пустую строку, а не
-  галлюцинирует «Продолжение следует…», так что фильтр по вероятности не нужен
-  (`ASRWorker` пропускает `None`);
-- нет детекции языка: Parakeet многоязычен и языко-агностичен на инференсе,
-  возвращаем то, что явно задано в конфиге.
+- there is no prompt conditioning, so `asr.vocabulary` does not work with this
+  backend — when the vocabulary is non-empty we warn in the log and in the UI status;
+- there is no `no_speech_prob`: on silence the model returns an empty string
+  rather than hallucinating "To be continued…", so a probability filter is not
+  needed (`ASRWorker` lets `None` through);
+- there is no language detection: Parakeet is multilingual and language-agnostic
+  at inference, so we return whatever the config states explicitly.
 
-Тем же API onnx-asr отдаёт и другие модели (например gigaam-v2-rnnt для
-русского) — достаточно поменять `asr.parakeet_model`.
+The same onnx-asr API serves other models too (gigaam-v2-rnnt for Russian, say)
+— it is enough to change `asr.parakeet_model`.
 """
 from __future__ import annotations
 
@@ -26,11 +27,13 @@ import numpy as np
 
 from ..config import ASRConfig
 from .base import ASRBackend, ASRResult
+from .weights import load_pinned_model
 
 log = logging.getLogger("ilh.asr")
 
 SAMPLE_RATE = 16000
-# Короче этого onnx-asr отдаёт мусор: кадров не хватает даже на один шаг энкодера.
+# Shorter than this and onnx-asr returns garbage: there are not even enough
+# frames for a single encoder step.
 MIN_AUDIO_S = 0.1
 
 
@@ -41,25 +44,19 @@ class ParakeetOnnxBackend(ASRBackend):
         self.model = None
 
     def load(self) -> None:
-        import onnx_asr
-
         log.info(
-            "Загружаю Parakeet %s (%s, %s)…",
+            "Loading Parakeet %s (%s, %s)…",
             self.cfg.parakeet_model, self.cfg.parakeet_quantization,
             ", ".join(self.cfg.providers),
         )
-        self.model = onnx_asr.load_model(
-            self.cfg.parakeet_model,
-            quantization=self.cfg.parakeet_quantization or None,
-            providers=list(self.cfg.providers),
-        )
-        # Прогрев: первая настоящая реплика не должна ждать инициализацию сессии.
+        self.model = load_pinned_model(self.cfg)
+        # Warm-up: the first real utterance must not wait for session initialisation.
         self.model.recognize(np.zeros(SAMPLE_RATE, dtype=np.float32), sample_rate=SAMPLE_RATE)
-        log.info("Parakeet готов")
+        log.info("Parakeet is ready")
         if self.cfg.vocabulary.strip():
             log.warning(
-                "Словарь терминов задан, но Parakeet не поддерживает подсказку промптом — "
-                "он будет проигнорирован. Для словаря переключите asr.backend на faster или mlx."
+                "A term vocabulary is set, but Parakeet does not support prompt hinting — "
+                "it will be ignored. For the vocabulary, switch asr.backend to faster or mlx."
             )
 
     def transcribe(self, audio: np.ndarray) -> ASRResult:
@@ -74,12 +71,12 @@ class ParakeetOnnxBackend(ASRBackend):
 
     def warnings(self) -> list[str]:
         if self.cfg.vocabulary.strip():
-            return ["словарь терминов не поддерживается Parakeet и проигнорирован"]
+            return ["the term vocabulary is not supported by Parakeet and was ignored"]
         return []
 
 
 def _extract_text(result) -> str:
-    """onnx-asr в разных версиях отдаёт то объект с `.text`, то саму строку."""
+    """Different versions of onnx-asr return either an object with `.text` or the string itself."""
     if isinstance(result, str):
         return result.strip()
     text = getattr(result, "text", None)

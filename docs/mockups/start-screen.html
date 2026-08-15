@@ -1,0 +1,404 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Стартовый экран — проекты</title>
+<style>
+/* Палитра — те же токены, что в app/web/app.css: тёмная база, светлая
+   переопределением. Без выбора тема берётся у системы. */
+:root{
+  color-scheme:dark;
+  --bg:#0f1216; --panel:#171b21; --panel2:#1d232b; --panel3:#232b35;
+  --border:#2a323d; --border-hi:#3d4a5a; --sep:#3f4855;
+  --text:#e6e9ee; --dim:#9aa4b2; --accent:#58a6ff; --accent-soft:rgba(88,166,255,.06);
+  --covered:#3fb950; --partial:#d29922; --notcov:#7d8590; --high:#f85149;
+  --primary-fg:#0b1017;
+  --alarm-bg:#1c1518; --alarm-border:#5c2b2b;
+  --shadow:rgba(0,0,0,.5);
+  --radius:10px;
+}
+@media (prefers-color-scheme:light){
+  :root:not([data-theme="dark"]){
+    color-scheme:light;
+    --bg:#ffffff; --panel:#f4f6f9; --panel2:#e7ebf0; --panel3:#dde3ea;
+    --border:#d3d9e0; --border-hi:#adb7c2; --sep:#c3cad3;
+    --text:#1a1f27; --dim:#5c6672; --accent:#0a63c9; --accent-soft:rgba(10,99,201,.07);
+    --covered:#1a7f37; --partial:#8a6100; --notcov:#6e7781; --high:#cf222e;
+    --primary-fg:#ffffff;
+    --alarm-bg:#fff5f5; --alarm-border:#f0b6ba;
+    --shadow:rgba(27,31,36,.18);
+  }
+}
+*{box-sizing:border-box}
+html,body{height:100%}
+body{
+  margin:0; background:var(--bg); color:var(--text);
+  font-family:"Segoe UI",-apple-system,BlinkMacSystemFont,Roboto,Arial,sans-serif;
+  font-size:14px; overflow:hidden;
+}
+button{font-family:inherit;cursor:pointer}
+input{font-family:inherit}
+
+/* ---------- свитчер состояний (только для макета) ---------- */
+#top{
+  height:38px;flex:0 0 38px;display:flex;align-items:center;gap:8px;
+  padding:0 12px;background:var(--panel);border-bottom:1px solid var(--border);
+}
+#top .lbl{font-size:11.5px;text-transform:uppercase;letter-spacing:.9px;color:var(--dim);font-weight:700}
+.tab{background:transparent;border:1px solid var(--border);color:var(--dim);padding:4px 11px;border-radius:7px;font-size:12.5px}
+.tab.on{background:var(--accent);border-color:var(--accent);color:var(--primary-fg);font-weight:600}
+
+#stage{position:absolute;top:38px;left:0;right:0;bottom:0;overflow-y:auto;
+  scrollbar-width:thin;scrollbar-color:var(--border) transparent}
+#stage::-webkit-scrollbar{width:9px}
+#stage::-webkit-scrollbar-thumb{background:var(--border);border-radius:9px}
+.state{display:none}
+.state.on{display:block}
+.wrap{max-width:1080px;margin:0 auto;padding:22px 26px 40px}
+
+/* ---------- шапка приложения ---------- */
+.appbar{display:flex;align-items:center;gap:12px;margin-bottom:14px}
+.brand{display:flex;align-items:baseline;gap:9px;min-width:0}
+.brand h1{font-size:19px;margin:0;font-weight:650;letter-spacing:.2px}
+.brand .sub{font-size:12px;color:var(--dim)}
+.icon-btn{
+  margin-left:auto;display:flex;align-items:center;gap:7px;
+  background:var(--panel);border:1px solid var(--border);color:var(--text);
+  padding:7px 13px;border-radius:8px;font-size:13px;
+}
+.icon-btn:hover{background:var(--panel2);border-color:var(--border-hi)}
+
+/* ---------- строка готовности ---------- */
+.ready{
+  display:flex;align-items:center;gap:16px;flex-wrap:wrap;
+  background:var(--panel);border:1px solid var(--border);border-radius:var(--radius);
+  padding:9px 14px;margin-bottom:20px;font-size:12.5px;
+}
+.ready .chk{display:flex;align-items:center;gap:7px;color:var(--dim)}
+.ready .dot{width:8px;height:8px;border-radius:50%;background:var(--covered);flex:0 0 8px}
+.ready .chk.bad{color:var(--text)}
+.ready .chk.bad .dot{background:var(--high)}
+.ready .chk.warn .dot{background:var(--partial)}
+.ready .fix{
+  margin-left:auto;background:transparent;border:1px solid var(--accent);color:var(--accent);
+  padding:4px 11px;border-radius:7px;font-size:12px;
+}
+.ready.alarm{border-color:var(--alarm-border);background:var(--alarm-bg)}
+.ready .note{flex-basis:100%;color:var(--dim);font-size:12px;line-height:1.5}
+
+/* ---------- панель действий ---------- */
+.actions{display:flex;align-items:center;gap:9px;margin-bottom:14px}
+.btn-primary{
+  background:var(--accent);border:1px solid var(--accent);color:var(--primary-fg);
+  font-weight:650;padding:8px 15px;border-radius:8px;font-size:13.5px;
+}
+.btn-primary:hover{filter:brightness(1.08)}
+.btn-ghost{
+  background:var(--panel);border:1px solid var(--border);color:var(--text);
+  padding:8px 14px;border-radius:8px;font-size:13.5px;
+}
+.btn-ghost:hover{background:var(--panel2);border-color:var(--border-hi)}
+.search{
+  margin-left:auto;background:var(--panel);border:1px solid var(--border);color:var(--text);
+  padding:8px 12px;border-radius:8px;font-size:13px;width:210px;
+}
+.search::placeholder{color:var(--dim)}
+.search:focus{outline:none;border-color:var(--accent)}
+
+/* ---------- сетка проектов ---------- */
+.sec-title{
+  font-size:11.5px;text-transform:uppercase;letter-spacing:.9px;color:var(--dim);
+  font-weight:700;margin:0 0 10px;
+}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(268px,1fr));gap:12px}
+
+.card{
+  position:relative;background:var(--panel);border:1px solid var(--border);
+  border-radius:var(--radius);padding:14px 15px 12px;cursor:pointer;
+  transition:border-color .12s,background .12s;
+}
+.card:hover{background:var(--panel2);border-color:var(--border-hi)}
+.card h3{
+  margin:0 30px 9px 0;font-size:15.5px;font-weight:600;line-height:1.3;
+  overflow:hidden;text-overflow:ellipsis;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;
+}
+.card .meta{display:flex;align-items:center;gap:8px;color:var(--dim);font-size:12.5px}
+.card .meta b{color:var(--text);font-weight:600}
+.card .meta .sep{color:var(--sep)}
+.card .meta.empty{color:var(--dim);font-style:italic}
+.card .foot{margin-top:11px;padding-top:10px;border-top:1px solid var(--border);display:flex;align-items:center;gap:8px}
+.chip{
+  background:var(--panel2);border:1px solid var(--border);color:var(--dim);
+  border-radius:20px;padding:2px 9px;font-size:11.5px;
+}
+.card:hover .chip{background:var(--panel3)}
+.more{
+  position:absolute;top:10px;right:8px;width:26px;height:26px;line-height:1;
+  background:transparent;border:1px solid transparent;color:var(--dim);
+  border-radius:6px;font-size:15px;
+}
+.card:hover .more{border-color:var(--border);background:var(--bg)}
+.more:hover{color:var(--text)}
+.menu{
+  position:absolute;top:38px;right:8px;z-index:5;min-width:186px;
+  background:var(--panel2);border:1px solid var(--border);border-radius:9px;
+  padding:5px;box-shadow:0 10px 26px var(--shadow);display:none;
+}
+.menu.on{display:block}
+.menu button{
+  display:block;width:100%;text-align:left;background:transparent;border:0;color:var(--text);
+  padding:7px 10px;border-radius:6px;font-size:13px;
+}
+.menu button:hover{background:var(--border)}
+.menu button.danger{color:var(--high)}
+.menu .hr{height:1px;background:var(--border);margin:5px 2px}
+
+/* карточка «Новый проект» */
+.card.new{
+  display:flex;flex-direction:column;align-items:center;justify-content:center;gap:7px;
+  border-style:dashed;color:var(--dim);min-height:118px;background:transparent;
+}
+.card.new:hover{color:var(--accent);border-color:var(--accent);background:var(--accent-soft)}
+.card.new .plus{font-size:22px;line-height:1}
+
+/* ---------- пустое состояние ---------- */
+.empty{
+  text-align:center;padding:70px 20px 40px;max-width:520px;margin:0 auto;
+}
+.empty .art{font-size:40px;margin-bottom:14px;opacity:.75}
+.empty h2{font-size:19px;margin:0 0 9px;font-weight:600}
+.empty p{color:var(--dim);font-size:13.5px;line-height:1.6;margin:0 0 22px}
+.empty .row{display:flex;gap:10px;justify-content:center}
+
+.footnote{margin-top:26px;color:var(--dim);font-size:11.5px;text-align:center}
+</style>
+</head>
+<body>
+
+<div id="top">
+  <span class="lbl">Состояние:</span>
+  <button class="tab on" data-s="s1">Есть проекты</button>
+  <button class="tab" data-s="s2">Первый запуск</button>
+  <button class="tab" data-s="s3">Нет системного звука</button>
+</div>
+
+<div id="stage">
+
+  <!-- ============ 1. ОСНОВНОЕ СОСТОЯНИЕ ============ -->
+  <section class="state on" id="s1"><div class="wrap">
+
+    <div class="appbar">
+      <div class="brand">
+        <h1>Помощник интервьюера</h1>
+        <span class="sub">все проекты</span>
+      </div>
+      <button class="icon-btn">⚙ Настройки</button>
+    </div>
+
+    <div class="ready">
+      <span class="chk"><i class="dot"></i> Микрофон</span>
+      <span class="chk"><i class="dot"></i> Системный звук</span>
+      <span class="chk"><i class="dot"></i> Распознавание</span>
+      <span class="chk"><i class="dot"></i> Подсказки</span>
+    </div>
+
+    <div class="actions">
+      <button class="btn-primary">＋ Новый проект</button>
+      <button class="btn-ghost">Записать без проекта</button>
+      <input class="search" placeholder="Поиск по проектам">
+    </div>
+
+    <div class="sec-title">Проекты — 6</div>
+    <div class="grid">
+
+      <div class="card">
+        <button class="more" onclick="menu(event,this)">⋯</button>
+        <div class="menu">
+          <button>Открыть папку проекта</button>
+          <button>Переименовать</button>
+          <div class="hr"></div>
+          <button class="danger">Удалить</button>
+        </div>
+        <h3>B2B-онбординг: первые 30 дней</h3>
+        <div class="meta"><b>7 интервью</b><span class="sep">·</span>последнее сегодня</div>
+        <div class="foot"><span class="chip">60 мин</span></div>
+      </div>
+
+      <div class="card">
+        <button class="more" onclick="menu(event,this)">⋯</button>
+        <div class="menu">
+          <button>Открыть папку проекта</button>
+          <button>Переименовать</button>
+          <div class="hr"></div>
+          <button class="danger">Удалить</button>
+        </div>
+        <h3>Отток на тарифе Pro</h3>
+        <div class="meta"><b>12 интервью</b><span class="sep">·</span>последнее вчера</div>
+        <div class="foot"><span class="chip">45 мин</span></div>
+      </div>
+
+      <div class="card">
+        <button class="more" onclick="menu(event,this)">⋯</button>
+        <div class="menu">
+          <button>Открыть папку проекта</button>
+          <button>Переименовать</button>
+          <div class="hr"></div>
+          <button class="danger">Удалить</button>
+        </div>
+        <h3>Мобильное приложение: сценарий оплаты</h3>
+        <div class="meta"><b>4 интервью</b><span class="sep">·</span>последнее 8 авг</div>
+        <div class="foot"><span class="chip">60 мин</span></div>
+      </div>
+
+      <div class="card">
+        <button class="more" onclick="menu(event,this)">⋯</button>
+        <div class="menu">
+          <button>Открыть папку проекта</button>
+          <button>Переименовать</button>
+          <div class="hr"></div>
+          <button class="danger">Удалить</button>
+        </div>
+        <h3>Интеграции с CRM</h3>
+        <div class="meta empty">Ещё нет интервью</div>
+        <div class="foot"><span class="chip">90 мин</span></div>
+      </div>
+
+      <div class="card">
+        <button class="more" onclick="menu(event,this)">⋯</button>
+        <div class="menu">
+          <button>Открыть папку проекта</button>
+          <button>Переименовать</button>
+          <div class="hr"></div>
+          <button class="danger">Удалить</button>
+        </div>
+        <h3>Рабочие места складских операторов</h3>
+        <div class="meta"><b>19 интервью</b><span class="sep">·</span>последнее 2 июл</div>
+        <div class="foot"><span class="chip">40 мин</span></div>
+      </div>
+
+      <div class="card">
+        <button class="more" onclick="menu(event,this)">⋯</button>
+        <div class="menu">
+          <button>Открыть папку проекта</button>
+          <button>Переименовать</button>
+          <div class="hr"></div>
+          <button class="danger">Удалить</button>
+        </div>
+        <h3>Пилот в «Северстали»</h3>
+        <div class="meta"><b>3 интервью</b><span class="sep">·</span>последнее 14 мая</div>
+        <div class="foot"><span class="chip">60 мин</span></div>
+      </div>
+
+      <div class="card new">
+        <span class="plus">＋</span>
+        <span>Новый проект</span>
+      </div>
+
+    </div>
+
+    <div class="footnote">Свежие проекты сверху · клик по карточке открывает проект</div>
+  </div></section>
+
+  <!-- ============ 2. ПЕРВЫЙ ЗАПУСК ============ -->
+  <section class="state" id="s2"><div class="wrap">
+
+    <div class="appbar">
+      <div class="brand"><h1>Помощник интервьюера</h1></div>
+      <button class="icon-btn">⚙ Настройки</button>
+    </div>
+
+    <div class="ready">
+      <span class="chk"><i class="dot"></i> Микрофон</span>
+      <span class="chk"><i class="dot"></i> Системный звук</span>
+      <span class="chk"><i class="dot"></i> Распознавание</span>
+      <span class="chk"><i class="dot"></i> Подсказки</span>
+    </div>
+
+    <div class="empty">
+      <div class="art">🗂</div>
+      <h2>Пока ни одного проекта</h2>
+      <p>Проект — это серия интервью по одному гайду. Он хранит гайд, словарь имён
+         и длительность, чтобы перед каждым звонком не собирать настройки заново,
+         и складывает записи одной папкой.</p>
+      <div class="row">
+        <button class="btn-primary">＋ Создать проект</button>
+        <button class="btn-ghost">Записать без проекта</button>
+      </div>
+    </div>
+  </div></section>
+
+  <!-- ============ 3. ПРОБЛЕМА С ГОТОВНОСТЬЮ ============ -->
+  <section class="state" id="s3"><div class="wrap">
+
+    <div class="appbar">
+      <div class="brand">
+        <h1>Помощник интервьюера</h1>
+        <span class="sub">все проекты</span>
+      </div>
+      <button class="icon-btn">⚙ Настройки</button>
+    </div>
+
+    <div class="ready alarm">
+      <span class="chk"><i class="dot"></i> Микрофон</span>
+      <span class="chk bad"><i class="dot"></i> Системный звук не найден</span>
+      <span class="chk"><i class="dot"></i> Распознавание</span>
+      <span class="chk warn"><i class="dot"></i> Подсказки: модель грузится</span>
+      <button class="fix">Исправить</button>
+      <span class="note">Голос собеседника писаться не будет — в записи останется только ваш микрофон.
+        Проверьте, что выбрано устройство вывода, на которое идёт звук Zoom.</span>
+    </div>
+
+    <div class="actions">
+      <button class="btn-primary">＋ Новый проект</button>
+      <button class="btn-ghost">Записать без проекта</button>
+      <input class="search" placeholder="Поиск по проектам">
+    </div>
+
+    <div class="sec-title">Проекты — 2</div>
+    <div class="grid">
+      <div class="card">
+        <button class="more" onclick="menu(event,this)">⋯</button>
+        <div class="menu">
+          <button>Открыть папку проекта</button>
+          <button>Переименовать</button>
+          <div class="hr"></div>
+          <button class="danger">Удалить</button>
+        </div>
+        <h3>B2B-онбординг: первые 30 дней</h3>
+        <div class="meta"><b>7 интервью</b><span class="sep">·</span>последнее сегодня</div>
+        <div class="foot"><span class="chip">60 мин</span></div>
+      </div>
+      <div class="card">
+        <button class="more" onclick="menu(event,this)">⋯</button>
+        <div class="menu">
+          <button>Открыть папку проекта</button>
+          <button>Переименовать</button>
+          <div class="hr"></div>
+          <button class="danger">Удалить</button>
+        </div>
+        <h3>Отток на тарифе Pro</h3>
+        <div class="meta"><b>12 интервью</b><span class="sep">·</span>последнее вчера</div>
+        <div class="foot"><span class="chip">45 мин</span></div>
+      </div>
+      <div class="card new"><span class="plus">＋</span><span>Новый проект</span></div>
+    </div>
+  </div></section>
+
+</div>
+
+<script>
+document.querySelectorAll('#top .tab').forEach(t => t.onclick = () => {
+  document.querySelectorAll('#top .tab').forEach(x => x.classList.toggle('on', x === t));
+  document.querySelectorAll('.state').forEach(s => s.classList.toggle('on', s.id === t.dataset.s));
+});
+function menu(e, btn){
+  e.stopPropagation();
+  const m = btn.nextElementSibling, was = m.classList.contains('on');
+  document.querySelectorAll('.menu').forEach(x => x.classList.remove('on'));
+  m.classList.toggle('on', !was);
+}
+document.addEventListener('click', () => document.querySelectorAll('.menu').forEach(m => m.classList.remove('on')));
+</script>
+</body>
+</html>

@@ -1,20 +1,20 @@
-"""Движок покрытия: running-состояние тем, планировщик с ручным запуском,
-вызов LLM и монотонное слияние результатов.
+"""Coverage engine: running topic state, a scheduler with a manual trigger,
+the LLM call and monotonic merging of the results.
 
-Три режима анализа:
-- delta      — обычный цикл: только новые реплики с прошлого анализа;
-- reconcile  — каждый N-й цикл: окно с прошлой сверки (ловит темы,
-               пропущенные в отдельных дельтах, не раздувая контекст);
-- final      — на «Стоп»: весь транскрипт последовательными окнами,
-               плюс сбор findings (тезисов) для отчёта.
+Three analysis modes:
+- delta      — the usual cycle: only utterances new since the last analysis;
+- reconcile  — every Nth cycle: the window since the last reconcile (catches
+               topics missed by individual deltas without inflating the context);
+- final      — on "Stop": the whole transcript in consecutive windows, plus
+               collecting findings for the report.
 """
 from __future__ import annotations
 
 import asyncio
 import logging
 import time
+from collections.abc import Awaitable, Callable, Mapping
 from datetime import datetime
-from typing import Awaitable, Callable
 
 from pydantic import ValidationError
 
@@ -52,6 +52,8 @@ class CoverageEngine:
         notify: Notify,
         session_store=None,
         session_id: str = "",
+        templates: Mapping[str, str] | None = None,
+        instructions: str = "",
     ):
         self.guide = guide
         self.transcript = transcript
@@ -70,27 +72,37 @@ class CoverageEngine:
             for i, (s, t) in enumerate(guide.all_topics())
         }
         self._system_live = prompts.system_prompt_live(
-            guide, analysis_cfg.max_recommendations, analysis_cfg.max_probes
+            guide,
+            analysis_cfg.max_recommendations,
+            analysis_cfg.max_probes,
+            templates=templates,
+            extra=instructions,
+            output_language=analysis_cfg.output_language,
         )
-        self._system_final = prompts.system_prompt_final(guide)
+        self._system_final = prompts.system_prompt_final(
+            guide,
+            templates=templates,
+            extra=instructions,
+            output_language=analysis_cfg.output_language,
+        )
         self._live_schema = build_live_schema()
         self._final_schema = build_final_schema()
 
-        self._recs: dict[str, Recommendation] = {}  # coverage_gap, ключ = topic_id
-        self._probes: list[Recommendation] = []     # свежие пробы, заменяются каждый цикл
-        self._findings: dict[str, list[str]] = {}   # topic_id -> тезисы (финальный проход)
-        self._muted: set[str] = set()               # темы со скрытыми рекомендациями
+        self._recs: dict[str, Recommendation] = {}  # coverage_gap, keyed by topic_id
+        self._probes: list[Recommendation] = []     # fresh probes, replaced every cycle
+        self._findings: dict[str, list[str]] = {}   # topic_id -> points (final pass)
+        self._muted: set[str] = set()               # topics with hidden recommendations
         self._cursor = 0
         self._reconcile_cursor = 0
         self._lock = asyncio.Lock()
         self.analyzing = False
         self.next_analysis_at: float | None = None
 
-    # ------------------------------------------------------------- планировщик
+    # --------------------------------------------------------------- scheduler
 
     async def run(self, stop_event: asyncio.Event, manual_event: asyncio.Event) -> None:
         log.info(
-            "Планировщик анализа запущен: интервал %d c, сверка каждый %s-й цикл",
+            "Analysis scheduler started: interval %d s, reconcile every %s cycles",
             self.cfg.interval_s, self.cfg.reconcile_every or "—",
         )
         try:
@@ -103,18 +115,22 @@ class CoverageEngine:
                 try:
                     await self.analyze(manual=manual)
                 except Exception:
-                    # Планировщик должен пережить любой сбой одного цикла.
-                    log.exception("Непредвиденная ошибка цикла анализа")
-                    await self.notify("error", {"message": "Внутренняя ошибка анализа — подробности в logs/app.log"})
+                    # The scheduler must survive any failure of a single cycle.
+                    log.exception("Unexpected error in the analysis cycle")
+                    await self.notify("error", {
+                        "message": "Internal analysis error — details in logs/app.log"
+                    })
                     await self.notify("analysis", {"phase": "failed"})
         except asyncio.CancelledError:
-            log.info("Планировщик анализа отменён")
+            log.info("Analysis scheduler cancelled")
             raise
         finally:
             self.next_analysis_at = None
 
-    async def _wait_for_trigger(self, stop_event: asyncio.Event, manual_event: asyncio.Event) -> bool:
-        """Ждёт до next_analysis_at; True — если сработал ручной запуск."""
+    async def _wait_for_trigger(
+        self, stop_event: asyncio.Event, manual_event: asyncio.Event
+    ) -> bool:
+        """Waits until next_analysis_at; True if the manual trigger fired."""
         remaining = (self.next_analysis_at or 0) - time.time()
         if remaining <= 0:
             return False
@@ -140,7 +156,7 @@ class CoverageEngine:
             {"next_analysis_at": self.next_analysis_at, "interval_s": self.cfg.interval_s},
         )
 
-    # ----------------------------------------------------------------- анализ
+    # ---------------------------------------------------------------- analysis
 
     def _pick_mode(self) -> str:
         next_iter = self.state.analysis_iteration + 1
@@ -150,14 +166,14 @@ class CoverageEngine:
 
     async def analyze(self, manual: bool = False) -> None:
         if self._lock.locked():
-            await self.notify("status", {"message": "Анализ уже выполняется"})
+            await self.notify("status", {"message": "Analysis is already running"})
             return
         async with self._lock:
             mode = self._pick_mode()
             cursor = self._reconcile_cursor if mode == "reconcile" else self._cursor
             segments, new_cursor = self.transcript.delta_since(cursor)
             if not segments:
-                await self.notify("status", {"message": "Нет новых реплик — анализ пропущен"})
+                await self.notify("status", {"message": "No new utterances — analysis skipped"})
                 return
             ok = await self._run_analysis(segments, mode, manual)
             if ok:
@@ -166,24 +182,24 @@ class CoverageEngine:
                     self._reconcile_cursor = new_cursor
 
     async def final_pass(self) -> bool:
-        """Финальная сверка всего транскрипта окнами; собирает findings.
-        Вызывается на «Стоп» после того, как ASR дожал очередь."""
+        """Final reconciliation of the whole transcript in windows; collects
+        findings. Called on "Stop" once ASR has drained its queue."""
         if self.transcript is None or self.llm is None:
             return False
         segments = sorted(self.transcript.all_segments(), key=lambda s: s.t0)
         if not segments:
             return False
         windows = self._split_windows(segments, self.llm_cfg.max_delta_chars)
-        log.info("Финальная сверка: %d окон, %d сегментов", len(windows), len(segments))
+        log.info("Final reconciliation: %d windows, %d segments", len(windows), len(segments))
         for i, window in enumerate(windows, 1):
             await self.notify(
                 "status",
-                {"message": f"Финальная сверка транскрипта: {i}/{len(windows)}…"},
+                {"message": f"Final transcript reconciliation: {i}/{len(windows)}…"},
             )
             async with self._lock:
                 ok = await self._run_analysis(window, "final", manual=False)
             if not ok:
-                log.warning("Финальная сверка прервана на окне %d/%d", i, len(windows))
+                log.warning("Final reconciliation aborted at window %d/%d", i, len(windows))
                 return False
         self._cursor = self._reconcile_cursor = len(self.transcript)
         return True
@@ -193,7 +209,7 @@ class CoverageEngine:
         windows: list[list[Segment]] = [[]]
         size = 0
         for seg in segments:
-            cost = len(seg.text) + 24  # префикс «[MM:SS] И: »
+            cost = len(seg.text) + 24  # the "[MM:SS] I: " prefix
             if windows[-1] and size + cost > max_chars:
                 windows.append([])
                 size = 0
@@ -233,11 +249,11 @@ class CoverageEngine:
                     raw_response=meta.raw_response[:20000],
                 )
             except OllamaError as e:
-                # Курсоры не двигаем: фрагмент попадёт в следующий цикл.
+                # Cursors stay put: the fragment will come round in the next cycle.
                 log_entry["error"] = str(e)
                 self._persist_log(log_entry)
-                log.error("Цикл анализа (%s) не удался: %s", mode, e)
-                await self.notify("error", {"message": f"Анализ не удался: {e}"})
+                log.error("Analysis cycle (%s) failed: %s", mode, e)
+                await self.notify("error", {"message": f"Analysis failed: {e}"})
                 await self.notify("analysis", {"phase": "failed"})
                 return False
 
@@ -251,7 +267,7 @@ class CoverageEngine:
         self._persist(log_entry)
         counts = self.state.counts()
         log.info(
-            "Анализ #%d (%s): %d обновлений, %d рекомендаций, %d проб, %.1f c (покрыто %d/%d)",
+            "Analysis #%d (%s): %d updates, %d recommendations, %d probes, %.1f s (covered %d/%d)",
             self.state.analysis_iteration, mode, applied, len(self._recs), len(self._probes),
             time.monotonic() - started, counts["covered"], counts["total"],
         )
@@ -265,10 +281,10 @@ class CoverageEngine:
         )
         return True
 
-    # ------------------------------------------------------- валидация/слияние
+    # ------------------------------------------------------- validation/merging
 
     def _validate(self, parsed: dict) -> AnalysisResponse:
-        """Повреждённые элементы отбрасываются по одному, остальное сохраняем."""
+        """Broken items are dropped one by one; everything else is kept."""
         updates: list[TopicUpdate] = []
         recs: list[Recommendation] = []
         findings: list[Finding] = []
@@ -276,17 +292,17 @@ class CoverageEngine:
             try:
                 updates.append(TopicUpdate.model_validate(item))
             except ValidationError as e:
-                log.warning("Отброшено невалидное обновление темы %r: %s", item, e)
+                log.warning("Dropped invalid topic update %r: %s", item, e)
         for item in parsed.get("recommendations") or []:
             try:
                 recs.append(Recommendation.model_validate(item))
             except ValidationError as e:
-                log.warning("Отброшена невалидная рекомендация %r: %s", item, e)
+                log.warning("Dropped invalid recommendation %r: %s", item, e)
         for item in parsed.get("findings") or []:
             try:
                 findings.append(Finding.model_validate(item))
             except ValidationError as e:
-                log.warning("Отброшен невалидный finding %r: %s", item, e)
+                log.warning("Dropped invalid finding %r: %s", item, e)
         return AnalysisResponse(topic_updates=updates, recommendations=recs, findings=findings)
 
     def _apply_response(self, resp: AnalysisResponse, mode: str = "delta") -> int:
@@ -299,16 +315,16 @@ class CoverageEngine:
                 unknown.append(upd.topic_id)
                 continue
             if st.manual:
-                continue  # ручная отметка исследователя — последнее слово
+                continue  # the researcher's manual mark has the last word
             if STATUS_RANK[upd.status] <= STATUS_RANK[st.status]:
-                continue  # монотонность: статусы не понижаются и не «мигают»
+                continue  # monotonicity: statuses never go down and never flicker
             st.status = upd.status
             st.confidence = upd.confidence
             st.evidence = upd.evidence or st.evidence
             st.last_update_iteration = iteration
             applied += 1
         if unknown:
-            log.warning("LLM вернула неизвестные topic_id (игнорирую): %s", unknown)
+            log.warning("The LLM returned unknown topic_ids (ignoring): %s", unknown)
 
         if mode == "final":
             for f in resp.findings:
@@ -330,37 +346,37 @@ class CoverageEngine:
         probes: list[Recommendation] = []
         for rec in recs:
             if rec.topic_id and rec.topic_id not in self.state.topics:
-                log.warning("Рекомендация для неизвестной темы %s — отвязываю", rec.topic_id)
+                log.warning("Recommendation for unknown topic %s — detaching it", rec.topic_id)
                 rec.topic_id = None
             if rec.type == "probe":
                 probes.append(rec)
                 continue
             if not rec.topic_id:
-                log.warning("coverage_gap без topic_id — игнорирую")
+                log.warning("coverage_gap without a topic_id — ignoring")
                 continue
             if self.state.topics[rec.topic_id].status == "covered":
                 continue
             self._recs[rec.topic_id] = rec
-        # Пробы живут один цикл: устаревшие подсказки «копнуть» только мешают.
+        # Probes live for one cycle: stale "dig into this" hints only get in the way.
         self._probes = probes[: self.cfg.max_probes]
 
-    # ------------------------------------------------- ручное управление (UI)
+    # ------------------------------------------------------ manual control (UI)
 
     def set_manual_status(self, topic_id: str, status: str | None) -> None:
-        """status=None снимает ручную метку (статус остаётся, LLM снова может
-        его обновлять); иначе фиксирует статус за исследователем."""
+        """status=None clears the manual mark (the status stays, and the LLM may
+        update it again); otherwise the status is pinned by the researcher."""
         st = self.state.topics.get(topic_id)
         if st is None:
-            raise ValueError(f"Неизвестная тема: {topic_id}")
+            raise ValueError(f"Unknown topic: {topic_id}")
         if status is None:
             st.manual = False
         else:
             if status not in STATUS_RANK:
-                raise ValueError(f"Некорректный статус: {status}")
-            st.status = status  # ручная правка может и понижать статус
+                raise ValueError(f"Invalid status: {status}")
+            st.status = status  # a manual edit may lower the status as well
             st.manual = True
             st.confidence = None
-            st.evidence = "отмечено вручную"
+            st.evidence = "marked manually"
             if status == "covered":
                 self._recs.pop(topic_id, None)
         st.last_update_iteration = self.state.analysis_iteration
@@ -370,16 +386,16 @@ class CoverageEngine:
             try:
                 self.store.save_coverage(self.state)
             except Exception:
-                log.exception("Не удалось сохранить состояние после ручной правки")
+                log.exception("Could not save the state after a manual edit")
 
     def dismiss_recommendation(self, topic_id: str) -> None:
-        """Скрывает подсказку по теме до ручного изменения её статуса."""
+        """Hides the hint for a topic until its status is changed manually."""
         if topic_id not in self.state.topics:
-            raise ValueError(f"Неизвестная тема: {topic_id}")
+            raise ValueError(f"Unknown topic: {topic_id}")
         self._muted.add(topic_id)
         self._recs.pop(topic_id, None)
 
-    # ------------------------------------------------------------ payload/диск
+    # ------------------------------------------------------------ payload/disk
 
     def coverage_payload(self) -> dict:
         return {
@@ -416,7 +432,9 @@ class CoverageEngine:
                     "_order": meta.get("order", 10**6),
                 }
             )
-        items.sort(key=lambda r: (r["urgency"] != "high", r["status"] != "not_covered", r["_order"]))
+        items.sort(
+            key=lambda r: (r["urgency"] != "high", r["status"] != "not_covered", r["_order"])
+        )
         for it in items:
             it.pop("_order", None)
         return items[: self.cfg.max_recommendations]
@@ -437,13 +455,14 @@ class CoverageEngine:
         try:
             self.store.save_coverage(self.state)
             self.store.append_recommendations(
-                self.state.analysis_iteration, self.current_recommendations() + self.current_probes()
+                self.state.analysis_iteration,
+                self.current_recommendations() + self.current_probes(),
             )
             self._persist_log(log_entry)
             if self.transcript is not None:
                 self.store.render_markdown(self.transcript.all_segments(), self.guide)
         except Exception:
-            log.exception("Не удалось сохранить результаты анализа на диск")
+            log.exception("Could not persist the analysis results to disk")
 
     def _persist_log(self, entry: dict) -> None:
         if self.store is None:
@@ -451,4 +470,4 @@ class CoverageEngine:
         try:
             self.store.append_analysis_log(entry)
         except Exception:
-            log.exception("Не удалось записать лог анализа")
+            log.exception("Could not write the analysis log")

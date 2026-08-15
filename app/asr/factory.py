@@ -1,12 +1,13 @@
-"""Выбор ASR-бэкенда.
+"""Choosing the ASR backend.
 
-`auto` предпочитает Parakeet (onnx-asr): он примерно на порядок быстрее Whisper
-и не занимает VRAM. Если onnx-asr не установлен — прежнее поведение: mlx на
-Apple Silicon, faster-whisper иначе.
+`auto` prefers Parakeet (onnx-asr): it is roughly an order of magnitude faster
+than Whisper and takes no VRAM. If onnx-asr is not installed, the old behaviour
+applies: mlx on Apple Silicon, faster-whisper otherwise.
 
-Точка расширения: на Apple Silicon Parakeet заметно быстрее через parakeet-mlx
-(Metal), чем через onnx-asr (CPU). Отдельный бэкенд-класс + ветка ниже — всё,
-что для этого нужно; остальной код от движка ASR не зависит.
+An extension point: on Apple Silicon, Parakeet is noticeably faster through
+parakeet-mlx (Metal) than through onnx-asr (CPU). A separate backend class plus
+a branch below is all that would take; the rest of the code does not depend on
+the ASR engine.
 """
 from __future__ import annotations
 
@@ -46,7 +47,7 @@ def create_asr_backend(cfg: ASRConfig) -> ASRBackend:
         from .faster_backend import FasterWhisperBackend
 
         return FasterWhisperBackend(cfg, device="cpu")
-    raise ValueError(f"Неизвестный ASR-бэкенд в конфиге: {cfg.backend}")
+    raise ValueError(f"Unknown ASR backend in the config: {cfg.backend}")
 
 
 def _onnx_asr_available() -> bool:
@@ -55,7 +56,7 @@ def _onnx_asr_available() -> bool:
 
         return True
     except ImportError:
-        log.warning("onnx-asr не установлен — Parakeet недоступен, откатываюсь на Whisper")
+        log.warning("onnx-asr is not installed — Parakeet is unavailable, falling back to Whisper")
         return False
 
 
@@ -65,5 +66,5 @@ def _mlx_available() -> bool:
 
         return True
     except ImportError:
-        log.warning("mlx-whisper не установлен — использую faster-whisper")
+        log.warning("mlx-whisper is not installed — using faster-whisper")
         return False

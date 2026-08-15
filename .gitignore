@@ -4,10 +4,17 @@ __pycache__/
 venv/
 env/
 .pytest_cache/
+pytest-of-*/
 .mypy_cache/
 sessions/
 guides/
+projects/
 logs/
 config.json
+prompts.json
+.window.json
 *.log
 .DS_Store
+.coverage
+.claude/settings.local.json
+*.lnk

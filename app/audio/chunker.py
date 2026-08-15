@@ -1,16 +1,16 @@
-"""Нарезка непрерывного аудиопотока на чанки речи.
+"""Cutting a continuous audio stream into speech chunks.
 
-Две реализации с одним контрактом `feed()` / `flush()`:
+Two implementations sharing one `feed()` / `flush()` contract:
 
-- `StreamingChunkAssembler` (основной) — режет по событиям потокового VAD:
-  реплика уходит в ASR через `vad_redemption_s` после того, как человек
-  замолчал. Каждый кадр аудио обрабатывается ровно один раз.
-- `ChunkAssembler` (запасной) — исходная нарезка по паузам: копит буфер и
-  ищет в нём паузу батчевым VAD'ом. Задержка привязана к `max_chunk_s`,
-  а разметка одного и того же аудио пересчитывается на каждом опросе.
+- `StreamingChunkAssembler` (the main one) cuts on streaming-VAD events: an
+  utterance goes to ASR `vad_redemption_s` after the person fell silent. Every
+  frame of audio is processed exactly once.
+- `ChunkAssembler` (the fallback) is the original pause-based cutting: it
+  accumulates a buffer and looks for a pause in it with a batch VAD. The latency
+  is tied to `max_chunk_s`, and the same audio is re-annotated on every poll.
 
-Обе тестируются без потоков и железа; ChunkerThread — тонкая обёртка:
-RingBuffer -> ассемблер -> очередь ASR.
+Both are testable without threads or hardware; ChunkerThread is a thin wrapper:
+RingBuffer -> assembler -> the ASR queue.
 """
 from __future__ import annotations
 
@@ -45,7 +45,7 @@ class ChunkAssembler:
         self.speaker = speaker
         self.sr = cfg.sample_rate
         self._buf = np.zeros(0, dtype=np.float32)
-        self._offset = 0  # сэмплов потока уже отброшено слева от _buf
+        self._offset = 0  # stream samples already discarded to the left of _buf
 
     def feed(self, new_audio: np.ndarray) -> list[AudioChunk]:
         if len(new_audio):
@@ -59,7 +59,7 @@ class ChunkAssembler:
         return out
 
     def flush(self) -> AudioChunk | None:
-        """Финальный чанк при остановке сессии — забираем остаток речи."""
+        """The final chunk when the session stops — take the remaining speech."""
         if len(self._buf) / self.sr < self.cfg.min_speech_s:
             return None
         regions = self.detector.speech_regions(self._buf)
@@ -73,17 +73,17 @@ class ChunkAssembler:
             return None
         regions = self.detector.speech_regions(self._buf)
         if not regions:
-            # Долгая тишина: держим только небольшой хвост, чтобы буфер не рос.
+            # Long silence: keep only a short tail so the buffer does not grow.
             if dur > 5.0:
-                keep = self.sr  # 1 секунда
+                keep = self.sr  # 1 second
                 consumed = len(self._buf) - keep
                 self._offset += consumed
                 self._buf = self._buf[consumed:]
             return None
-        # Пауза внутри буфера: завершённая реплика отрезается сразу, не дожидаясь
-        # тишины в хвосте (критично, когда аудио поступает пачкой и следующая
-        # реплика уже началась).
-        for (_, end_a), (start_b, _) in zip(regions, regions[1:]):
+        # A pause inside the buffer: a finished utterance is cut off at once,
+        # without waiting for silence in the tail (critical when audio arrives in
+        # a batch and the next utterance has already started).
+        for (_, end_a), (start_b, _) in zip(regions, regions[1:], strict=False):
             if start_b - end_a >= self.cfg.min_pause_s:
                 return self._emit([r for r in regions if r[1] <= end_a], end_a)
         trailing = dur - regions[-1][1]
@@ -92,7 +92,7 @@ class ChunkAssembler:
         return None
 
     def _emit(self, regions: list[tuple[float, float]], end_s: float) -> AudioChunk | None:
-        """Вырезает [начало первой реплики − pad; end_s + pad] и сдвигает буфер."""
+        """Cuts out [start of the first utterance − pad; end_s + pad] and shifts the buffer."""
         dur = len(self._buf) / self.sr
         start_s = max(regions[0][0] - self.cfg.pad_s, 0.0)
         end_pad = min(end_s + self.cfg.pad_s, dur)
@@ -112,23 +112,23 @@ class ChunkAssembler:
 
 
 class StreamingChunkAssembler:
-    """Нарезка по событиям потокового VAD.
+    """Cutting driven by streaming-VAD events.
 
-    Держит скользящее окно недавнего аудио (`_buf`, начинающийся на абсолютной
-    позиции `_buf_start`) и вырезает из него реплику, как только пришёл
-    `SpeechEnd`. Ждать заполнения буфера не нужно, поэтому задержка сегмента
-    определяется только `vad_redemption_s` и скоростью ASR.
+    Keeps a sliding window of recent audio (`_buf`, starting at absolute position
+    `_buf_start`) and cuts an utterance out of it as soon as a `SpeechEnd`
+    arrives. There is no need to wait for a buffer to fill, so a segment's latency
+    is set only by `vad_redemption_s` and the speed of ASR.
 
-    Инварианты:
+    Invariants:
 
-    - `t0/t1` — абсолютные секунды от старта захвата (на этом держится
-      восстановление порядка реплик двух каналов сортировкой по `t0`);
-    - соседние чанки не перекрываются и не оставляют дыр: `_emitted_through`
-      помнит, до какого сэмпла аудио уже отдано, и pad добавляется только на
-      настоящих границах речи, а не на принудительном разрезе монолога.
+    - `t0/t1` are absolute seconds from the start of capture (recovering the
+      order of the two channels' utterances by sorting on `t0` rests on this);
+    - neighbouring chunks neither overlap nor leave gaps: `_emitted_through`
+      remembers how far the audio has already been handed out, and padding is
+      added only at real speech boundaries, not at a forced cut in a monologue.
     """
 
-    # Короче этого чанк не имеет смысла отдавать в ASR (модели выдают мусор).
+    # Shorter than this, a chunk is not worth sending to ASR (the models produce garbage).
     MIN_EMIT_S = 0.1
 
     def __init__(self, source: SpeechEventSource, cfg: AudioConfig, speaker: Speaker):
@@ -137,21 +137,21 @@ class StreamingChunkAssembler:
         self.speaker = speaker
         self.sr = cfg.sample_rate
         self._buf = np.zeros(0, dtype=np.float32)
-        self._buf_start = 0        # абсолютная позиция сэмпла _buf[0]
-        self._stream_end = 0       # сколько сэмплов всего прошло через feed()
-        self._emitted_through = 0  # до какого сэмпла аудио уже отдано в ASR
+        self._buf_start = 0        # absolute position of sample _buf[0]
+        self._stream_end = 0       # how many samples have passed through feed() in total
+        self._emitted_through = 0  # how far the audio has already gone to ASR
         self._speech_start: int | None = None
         self._pre_pad = int(cfg.pre_pad_s * self.sr)
         self._post_pad = int(cfg.pad_s * self.sr)
         self._max_samples = int(cfg.max_chunk_s * self.sr)
-        # Между репликами гарантированно есть vad_redemption_s тишины — именно
-        # столько ждёт VAD, прежде чем закрыть реплику. Если pad'ы в сумме
-        # перекрывают этот зазор, конец одного чанка залезет на начало
-        # следующего и слова задвоятся в транскрипте.
+        # Between utterances there are guaranteed to be vad_redemption_s of
+        # silence — that is exactly how long the VAD waits before closing an
+        # utterance. If the pads together exceed that gap, the end of one chunk
+        # runs into the start of the next and words get doubled in the transcript.
         if cfg.pre_pad_s + cfg.pad_s >= cfg.vad_redemption_s:
             log.warning(
-                "pre_pad_s + pad_s (%.2f) >= vad_redemption_s (%.2f): соседние чанки "
-                "будут перекрываться, реплики задвоятся. Уменьшите pad'ы или увеличьте "
+                "pre_pad_s + pad_s (%.2f) >= vad_redemption_s (%.2f): neighbouring chunks "
+                "will overlap and utterances will be doubled. Reduce the pads or raise "
                 "vad_redemption_s.",
                 cfg.pre_pad_s + cfg.pad_s, cfg.vad_redemption_s,
             )
@@ -170,12 +170,12 @@ class StreamingChunkAssembler:
                                              ev.end_timestamp_samples, pad_end=True))
                 self._speech_start = None
         if not self.source.in_speech:
-            # Реплику отсеял фильтр минимальной длительности: SpeechStart был,
-            # SpeechEnd не будет.
+            # The minimum-duration filter dropped the utterance: there was a
+            # SpeechStart, there will be no SpeechEnd.
             self._speech_start = None
 
-        # Монолог длиннее max_chunk_s: режем принудительно, чтобы транскрипт
-        # не молчал до конца ответа.
+        # A monologue longer than max_chunk_s: cut it forcibly so the transcript
+        # does not stay silent until the answer ends.
         if (
             self._speech_start is not None
             and self._stream_end - self._speech_start >= self._max_samples
@@ -187,7 +187,7 @@ class StreamingChunkAssembler:
         return out
 
     def flush(self) -> AudioChunk | None:
-        """Хвост при остановке сессии: закрываем незавершённую реплику."""
+        """The tail when the session stops: close the unfinished utterance."""
         chunk = None
         for ev in self.source.flush():
             if isinstance(ev, SpeechEnd):
@@ -204,15 +204,15 @@ class StreamingChunkAssembler:
             out.append(chunk)
 
     def _emit(self, start: int, end: int, pad_end: bool) -> AudioChunk | None:
-        # Всё, что уже отдано, не отдаём повторно: после принудительного разреза
-        # SpeechEnd приносит исходное начало реплики, которое давно позади.
+        # Nothing already handed out is handed out twice: after a forced cut,
+        # SpeechEnd brings the utterance's original start, long since passed.
         start = max(start, self._emitted_through)
         if end - start < self.MIN_EMIT_S * self.sr:
             return None
 
-        # Pre-pad только на настоящем начале реплики: Silero срабатывает чуть
-        # позже первого слога. На стыке после принудительного разреза padding
-        # продублировал бы уже отданное аудио.
+        # Pre-pad only at a real start of an utterance: Silero fires slightly
+        # after the first syllable. At the seam following a forced cut, padding
+        # would duplicate audio that has already gone out.
         a = start - self._pre_pad if start > self._emitted_through else start
         b = end + self._post_pad if pad_end else end
         a = max(a, self._buf_start)
@@ -225,7 +225,7 @@ class StreamingChunkAssembler:
         return AudioChunk(speaker=self.speaker, audio=audio, t0=a / self.sr, t1=b / self.sr)
 
     def _trim(self) -> None:
-        """Отбросить аудио, которое уже никому не понадобится."""
+        """Discard audio nobody will need any more."""
         anchor = self._speech_start if self._speech_start is not None else self._stream_end
         keep_from = max(0, anchor - self._pre_pad)
         if keep_from > self._buf_start:
@@ -234,11 +234,11 @@ class StreamingChunkAssembler:
 
 
 def create_assembler(cfg: AudioConfig, speaker: Speaker) -> ChunkAssemblerLike:
-    """Ассемблер по `audio.vad`: потоковый по умолчанию, батчевый — по запросу."""
+    """The assembler chosen by `audio.vad`: streaming by default, batch on request."""
     if cfg.vad in ("silero", "energy"):
         from .vad import create_detector
 
-        log.info("Нарезка %s: батчевая по паузам (vad=%s)", speaker.value, cfg.vad)
+        log.info("Chunking %s: batch, by pauses (vad=%s)", speaker.value, cfg.vad)
         return ChunkAssembler(create_detector(cfg.vad), cfg, speaker)
     return StreamingChunkAssembler(create_stream_processor(cfg), cfg, speaker)
 
@@ -249,7 +249,7 @@ class ChunkerThread(threading.Thread):
         speaker: Speaker,
         ring: RingBuffer,
         assembler: ChunkAssemblerLike,
-        out_queue: "queue.Queue[AudioChunk]",
+        out_queue: queue.Queue[AudioChunk],
         cfg: AudioConfig,
         stop_event: threading.Event,
     ):
@@ -263,7 +263,7 @@ class ChunkerThread(threading.Thread):
         self._last_dropped = 0
 
     def run(self) -> None:
-        log.info("Чанкер %s запущен", self.speaker.value)
+        log.info("Chunker %s started", self.speaker.value)
         try:
             while not self.stop_event.wait(self.cfg.poll_interval_s):
                 self._pump()
@@ -272,28 +272,28 @@ class ChunkerThread(threading.Thread):
             if final is not None:
                 self.out_queue.put(final)
         except Exception:
-            log.exception("Чанкер %s аварийно остановлен", self.speaker.value)
-        log.info("Чанкер %s остановлен", self.speaker.value)
+            log.exception("Chunker %s stopped abnormally", self.speaker.value)
+        log.info("Chunker %s stopped", self.speaker.value)
 
-    MAX_BACKLOG = 60  # чанков; дальше ASR уже не догонит — не копим память впустую
+    MAX_BACKLOG = 60  # chunks; beyond this ASR will never catch up — do not waste memory
 
     def _pump(self) -> None:
         if self.ring.dropped_samples > self._last_dropped:
             log.warning(
-                "Канал %s: переполнение буфера, потеряно %d сэмплов",
+                "Channel %s: buffer overflow, %d samples lost",
                 self.speaker.value, self.ring.dropped_samples - self._last_dropped,
             )
             self._last_dropped = self.ring.dropped_samples
         for chunk in self.assembler.feed(self.ring.pop_all()):
             if self.out_queue.qsize() >= self.MAX_BACKLOG:
                 log.error(
-                    "Очередь ASR переполнена (%d) — чанк %s %.1f–%.1f c отброшен. "
-                    "ASR мёртв или безнадёжно отстаёт.",
+                    "The ASR queue is full (%d) — chunk %s %.1f–%.1f s was dropped. "
+                    "ASR is dead or hopelessly behind.",
                     self.out_queue.qsize(), self.speaker.value, chunk.t0, chunk.t1,
                 )
                 continue
             self.out_queue.put(chunk)
             log.debug(
-                "Чанк %s: %.1f–%.1f c (%.1f c аудио)",
+                "Chunk %s: %.1f–%.1f s (%.1f s of audio)",
                 self.speaker.value, chunk.t0, chunk.t1, chunk.t1 - chunk.t0,
             )

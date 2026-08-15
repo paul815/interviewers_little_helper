@@ -1,12 +1,13 @@
-"""E2E без железа: конвейер аудио->чанкер->ASR-воркер->транскрипт на фейковом
-ASR-бэкенде и полный цикл движка (анализ, сверка, финал, отчёт) на фейковой LLM."""
+"""E2E without hardware: the audio -> chunker -> ASR worker -> transcript pipeline
+on a fake ASR backend, and the engine's full cycle (analysis, reconcile, final,
+report) on a fake LLM."""
 from __future__ import annotations
 
 import asyncio
 import json
+import queue as queue_mod
 import threading
 import time
-import queue as queue_mod
 
 import numpy as np
 import pytest
@@ -15,7 +16,7 @@ from app.asr.base import ASRBackend, ASRResult
 from app.asr.worker import ASRWorker
 from app.audio.capture import RingBuffer
 from app.audio.chunker import ChunkerThread, create_assembler
-from app.config import ASRConfig, AnalysisConfig, AudioConfig, LLMConfig
+from app.config import AnalysisConfig, ASRConfig, AudioConfig, LLMConfig
 from app.coverage.engine import CoverageEngine
 from app.domain import Speaker
 from app.guide.schemas import Guide, Section, Topic
@@ -27,10 +28,10 @@ from app.transcript.store import TranscriptStore
 SR = 16000
 
 
-# ------------------------------------------------------- фейковые бэкенды
+# ------------------------------------------------------------ fake backends
 
 class FakeASRBackend(ASRBackend):
-    """Отдаёт заготовленные реплики по очереди, независимо от аудио."""
+    """Hands out prepared utterances in turn, regardless of the audio."""
 
     def __init__(self, lines: list[str]):
         self.lines = list(lines)
@@ -43,12 +44,12 @@ class FakeASRBackend(ASRBackend):
     def transcribe(self, audio: np.ndarray) -> ASRResult:
         text = self.lines[self._i % len(self.lines)]
         self._i += 1
-        return ASRResult(text=text, language="ru", no_speech_prob=0.0)
+        return ASRResult(text=text, language="en", no_speech_prob=0.0)
 
 
 class FakeLLM:
-    """Детерминированные ответы: live-схема -> обновления+рекомендации,
-    final-схема (по наличию findings) -> обновления+тезисы."""
+    """Deterministic answers: the live schema -> updates plus recommendations,
+    the final schema (detected by the presence of findings) -> updates plus points."""
 
     def __init__(self):
         self.calls: list[str] = []
@@ -59,24 +60,25 @@ class FakeLLM:
         if final:
             parsed = {
                 "topic_updates": [
-                    {"topic_id": "s1.t2", "status": "partial", "evidence": "мельком упомянул"},
+                    {"topic_id": "s1.t2", "status": "partial", "evidence": "mentioned in passing"},
                 ],
                 "findings": [
-                    {"topic_id": "s1.t1", "finding": "пользуется Jira и Notion"},
+                    {"topic_id": "s1.t1", "finding": "uses Jira and Notion"},
                 ],
             }
         else:
             parsed = {
                 "topic_updates": [
                     {"topic_id": "s1.t1", "status": "covered",
-                     "evidence": "рассказал про инструменты", "confidence": 0.9},
+                     "evidence": "talked about the tools", "confidence": 0.9},
                 ],
                 "recommendations": [
                     {"type": "coverage_gap", "topic_id": "s1.t2", "urgency": "high",
-                     "note": "не поднималось", "suggested_question": "А что с потерями задач?"},
-                    {"type": "probe", "note": "зацепка про стикеры",
-                     "suggested_question": "Почему стикеры, а не приложение?",
-                     "quote": "клею стикеры на монитор"},
+                     "note": "never came up",
+                     "suggested_question": "And what about tasks getting lost?"},
+                    {"type": "probe", "note": "a hook about the sticky notes",
+                     "suggested_question": "Why sticky notes rather than an app?",
+                     "quote": "I stick notes on the monitor"},
                 ],
             }
         meta = ChatMeta(duration_s=0.01, prompt_chars=len(system) + len(user),
@@ -86,15 +88,15 @@ class FakeLLM:
 
 def make_guide() -> Guide:
     return Guide(
-        guide_id="g-e2e", language="ru", title="E2E",
-        sections=[Section(id="s1", title="Секция", topics=[
-            Topic(id="s1.t1", question="Какие инструменты?"),
-            Topic(id="s1.t2", question="Теряются ли задачи?"),
+        guide_id="g-e2e", language="en", title="E2E",
+        sections=[Section(id="s1", title="Section", topics=[
+            Topic(id="s1.t1", question="Which tools?"),
+            Topic(id="s1.t2", question="Do tasks get lost?"),
         ])],
     )
 
 
-# ------------------------------------------------------------- конвейер
+# ------------------------------------------------------------- pipeline
 
 def tone(seconds: float) -> np.ndarray:
     t = np.arange(int(seconds * SR)) / SR
@@ -105,21 +107,21 @@ def silence(seconds: float) -> np.ndarray:
     return np.zeros(int(seconds * SR), dtype=np.float32)
 
 
-# Оба пути нарезки: потоковый (по умолчанию) и батчевый по паузам (запасной).
-# Ни один не требует onnxruntime — энергетический источник событий встроен.
+# Both cutting routes: streaming (the default) and batch by pauses (the fallback).
+# Neither needs onnxruntime — the energy event source is built in.
 @pytest.mark.parametrize("vad", ["energy-stream", "energy"])
 def test_audio_to_transcript_pipeline(vad):
     audio_cfg = AudioConfig(
         poll_interval_s=0.05, min_pause_s=0.4, min_speech_s=0.2, pad_s=0.05, vad=vad,
     )
     ring = RingBuffer(audio_cfg.ring_seconds, SR)
-    out_q: "queue_mod.Queue" = queue_mod.Queue()
+    out_q: queue_mod.Queue = queue_mod.Queue()
     stop = threading.Event()
     transcript = TranscriptStore()
 
     assembler = create_assembler(audio_cfg, Speaker.RESPONDENT)
     chunker = ChunkerThread(Speaker.RESPONDENT, ring, assembler, out_q, audio_cfg, stop)
-    backend = FakeASRBackend(["первая реплика", "вторая реплика"])
+    backend = FakeASRBackend(["first utterance", "second utterance"])
     worker = ASRWorker(
         backend, out_q,
         on_segment=lambda ch, txt, lang: transcript.add(ch.speaker, ch.t0, ch.t1, txt, lang),
@@ -129,13 +131,13 @@ def test_audio_to_transcript_pipeline(vad):
     chunker.start()
     worker.start()
 
-    # Две «реплики», разделённые паузой; хвост без паузы дожмётся при остановке.
+    # Two "utterances" separated by a pause; the tail without a pause is flushed on stop.
     ring.append(np.concatenate([tone(1.0), silence(0.8), tone(1.0)]))
 
     deadline = time.monotonic() + 8.0
     while len(transcript) < 1 and time.monotonic() < deadline:
         time.sleep(0.05)
-    assert len(transcript) >= 1, "первый чанк не дошёл до транскрипта"
+    assert len(transcript) >= 1, "the first chunk never reached the transcript"
 
     stop.set()
     chunker.join(5.0)
@@ -144,27 +146,27 @@ def test_audio_to_transcript_pipeline(vad):
 
     segs = transcript.all_segments()
     assert len(segs) == 2, [s.text for s in segs]
-    assert segs[0].text == "первая реплика" and segs[1].text == "вторая реплика"
+    assert segs[0].text == "first utterance" and segs[1].text == "second utterance"
     assert segs[0].speaker == Speaker.RESPONDENT
-    assert 0 <= segs[0].t0 < segs[1].t0  # хронология сохранена
+    assert 0 <= segs[0].t0 < segs[1].t0  # the chronology is preserved
 
 
 def test_pipeline_latency_in_real_time():
-    """Задержка «человек договорил → строка в транскрипте» на живом темпе.
+    """The "the person finished speaking -> a line in the transcript" latency at a live pace.
 
-    Аудио подаётся в RingBuffer блоками по 20 мс по стенным часам, как это
-    делал бы драйвер, и работают настоящие ChunkerThread + ASRWorker. ASR
-    отвечает мгновенно, поэтому замер показывает вклад **самого конвейера**:
-    `vad_redemption_s` (0.6) + до `poll_interval_s` (0.2) + работа VAD.
-    Ради этого числа всё и переделывалось, так что регресс тут должен ронять
-    тест, а не всплывать на живом интервью.
+    Audio is fed into the RingBuffer in 20 ms blocks by wall clock, as a driver
+    would, and real ChunkerThread and ASRWorker instances are running. ASR answers
+    instantly, so the measurement shows the contribution of **the pipeline
+    itself**: `vad_redemption_s` (0.6) plus up to `poll_interval_s` (0.2) plus the
+    VAD's own work. This number is what the whole rework was for, so a regression
+    here should fail the test rather than surface in a live interview.
 
-    Границы широкие: нижняя ловит разрез посреди речи, верхняя — грубое
-    замедление, не мигая на медленном раннере.
+    The bounds are wide: the lower one catches a cut in mid-speech, the upper one
+    a gross slowdown, without flickering on a slow runner.
     """
     cfg = AudioConfig(vad="energy-stream")
     ring = RingBuffer(cfg.ring_seconds, SR)
-    out_q: "queue_mod.Queue" = queue_mod.Queue()
+    out_q: queue_mod.Queue = queue_mod.Queue()
     stop = threading.Event()
     transcript = TranscriptStore()
     arrivals: list[float] = []
@@ -175,7 +177,7 @@ def test_pipeline_latency_in_real_time():
         out_q, cfg, stop,
     )
     worker = ASRWorker(
-        FakeASRBackend(["реплика"]), out_q,
+        FakeASRBackend(["utterance"]), out_q,
         on_segment=lambda ch, txt, lang: transcript.add(ch.speaker, ch.t0, ch.t1, txt, lang),
         on_status=lambda phase, msg: None,
         cfg=ASRConfig(), stop_event=stop,
@@ -183,9 +185,10 @@ def test_pipeline_latency_in_real_time():
     chunker.start()
     worker.start()
 
-    # Шум как «речь»: энергетический источник событий смотрит на RMS. Тишины
-    # в хвосте заведомо больше, чем vad_redemption_s, — иначе реплику закрыл бы
-    # только flush на остановке, и замер потерял бы смысл.
+    # Noise as "speech": the energy event source looks at RMS. There is
+    # deliberately more silence in the tail than vad_redemption_s — otherwise the
+    # utterance would only be closed by the flush on stop and the measurement
+    # would be meaningless.
     rng = np.random.default_rng(7)
     block_s, blocks_fed = 0.02, 0
     started = time.monotonic()
@@ -206,13 +209,16 @@ def test_pipeline_latency_in_real_time():
     chunker.join(5.0)
     worker.join(5.0)
 
-    assert arrivals, "реплика так и не доехала до транскрипта за отведённое время"
+    assert arrivals, "the utterance never reached the transcript within the time allowed"
     latency = arrivals[0] - speech_ended_at
-    assert latency >= 0.4, f"сегмент выдан через {latency:.2f} c — раньше, чем VAD мог закрыть реплику"
-    assert latency <= 3.0, f"задержка конвейера {latency:.2f} c — что-то заметно тормозит"
+    assert latency >= 0.4, (
+        f"the segment came out after {latency:.2f} s — sooner than the VAD could "
+        f"close the utterance"
+    )
+    assert latency <= 3.0, f"pipeline latency {latency:.2f} s — something is markedly slow"
 
 
-# ------------------------------------------------- движок + отчёт целиком
+# ------------------------------------------------ the engine and the report
 
 def test_engine_cycles_and_report(tmp_path):
     store = SessionStore(tmp_path, "e2e")
@@ -232,15 +238,16 @@ def test_engine_cycles_and_report(tmp_path):
     )
 
     async def scenario():
-        transcript.add(Speaker.INTERVIEWER, 1.0, 3.0, "Какими инструментами пользуетесь?", "ru")
-        transcript.add(Speaker.RESPONDENT, 4.0, 9.0, "Jira, Notion, клею стикеры на монитор", "ru")
+        transcript.add(Speaker.INTERVIEWER, 1.0, 3.0, "Which tools do you use?", "en")
+        transcript.add(Speaker.RESPONDENT, 4.0, 9.0,
+                       "Jira, Notion, I stick notes on the monitor", "en")
         await engine.analyze(manual=True)
 
         assert engine.state.topics["s1.t1"].status == "covered"
         assert [r["topic_id"] for r in engine.current_recommendations()] == ["s1.t2"]
         assert len(engine.current_probes()) == 1
 
-        # Пустая дельта -> цикл пропускается, счётчик не растёт.
+        # An empty delta -> the cycle is skipped and the counter does not grow.
         before = engine.state.analysis_iteration
         await engine.analyze(manual=True)
         assert engine.state.analysis_iteration == before
@@ -248,12 +255,12 @@ def test_engine_cycles_and_report(tmp_path):
         ok = await engine.final_pass()
         assert ok
         assert engine.state.topics["s1.t2"].status == "partial"
-        assert engine.findings() == {"s1.t1": ["пользуется Jira и Notion"]}
+        assert engine.findings() == {"s1.t1": ["uses Jira and Notion"]}
         assert llm.calls[-1] == "final"
 
     asyncio.run(scenario())
 
-    store.add_flag(5.0, "стикеры!")
+    store.add_flag(5.0, "sticky notes!")
     md = build_report_markdown(
         session_id="e2e", guide=guide, state=engine.state,
         findings=engine.findings(), flags=store.flags,
@@ -270,5 +277,5 @@ def test_engine_cycles_and_report(tmp_path):
     saved = json.loads((d / "coverage_state.json").read_text(encoding="utf-8"))
     assert saved["topics"]["s1.t1"]["status"] == "covered"
     report_text = (d / "report.md").read_text(encoding="utf-8")
-    assert "пользуется Jira и Notion" in report_text and "стикеры!" in report_text
+    assert "uses Jira and Notion" in report_text and "sticky notes!" in report_text
     assert "coverage" in events and "recommendations" in events

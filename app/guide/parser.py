@@ -1,7 +1,7 @@
-"""Парсинг свободного текста гайда в структуру через LLM (один раз на сессию).
+"""Parsing free-form guide text into a structure via the LLM (once per session).
 
-Идентификаторы секций/тем назначаются детерминированно на нашей стороне —
-LLM возвращает только структуру без id.
+Section/topic identifiers are assigned deterministically on our side — the LLM
+returns only the structure, without ids.
 """
 from __future__ import annotations
 
@@ -43,32 +43,34 @@ GUIDE_PARSE_SCHEMA: dict = {
     "required": ["title", "language", "sections"],
 }
 
-_SYSTEM = """Ты — ассистент качественного исследователя. Тебе дают текст гайда интервью \
-в свободной форме. Преобразуй его в структуру: секции, внутри — темы/вопросы.
+SYSTEM_PARSE = """You are an assistant to a qualitative researcher. You are given the text of an \
+interview guide in free form. Turn it into a structure: sections, and topics/questions inside them.
 
-Правила:
-- Сохраняй язык и формулировки оригинала, ничего не выдумывай и не добавляй от себя.
-- Каждый самостоятельный вопрос или тема — отдельный элемент topics. Если в одной строке \
-несколько разных вопросов по смыслу — раздели их.
-- Пояснения, подсказки интервьюеру («если молчит — спросить про…») клади в notes к теме.
-- Если в тексте нет явных секций — создай одну секцию с осмысленным названием.
-- title — короткое название всего гайда (придумай по содержанию, на языке гайда).
-- language — основной язык гайда кодом ISO 639-1 («ru», «en», …).
+Rules:
+- Keep the original language and wording, invent nothing and add nothing of your own.
+- Every self-contained question or topic is a separate topics element. If one line holds several \
+distinct questions by meaning, split them.
+- Explanations and hints for the interviewer ("if they go quiet, ask about…") go into \
+the topic's notes.
+- If the text has no explicit sections, create one section with a meaningful name.
+- title is a short name for the whole guide (make one up from the content, in the guide's language).
+- language is the guide's main language as an ISO 639-1 code ("ru", "en", …).
 
-Ответ — строго JSON по схеме."""
+The answer is strictly JSON matching the schema."""
 
 
-async def parse_guide_text(llm: OllamaClient, raw_text: str) -> Guide:
+async def parse_guide_text(llm: OllamaClient, raw_text: str, system: str = "") -> Guide:
     raw_text = raw_text.strip()
     if not raw_text:
-        raise ValueError("Текст гайда пуст")
-    parsed, meta = await llm.chat_json(_SYSTEM, f"ТЕКСТ ГАЙДА:\n\n{raw_text}", GUIDE_PARSE_SCHEMA)
-    log.info("Гайд распарсен за %.1f c (повтор: %s)", meta.duration_s, meta.retried)
+        raise ValueError("The guide text is empty")
+    system = system or SYSTEM_PARSE
+    parsed, meta = await llm.chat_json(system, f"GUIDE TEXT:\n\n{raw_text}", GUIDE_PARSE_SCHEMA)
+    log.info("Guide parsed in %.1f s (retried: %s)", meta.duration_s, meta.retried)
     return build_guide(parsed)
 
 
 def build_guide(parsed: dict) -> Guide:
-    """Собирает Guide из сырого ответа LLM, назначая детерминированные id."""
+    """Assembles a Guide from the raw LLM response, assigning deterministic ids."""
     sections = []
     for si, sec in enumerate(parsed.get("sections") or [], start=1):
         topics = []
@@ -78,14 +80,14 @@ def build_guide(parsed: dict) -> Guide:
                 continue
             notes = (topic.get("notes") or "").strip() or None
             topics.append(Topic(id=f"s{si}.t{ti}", question=question, notes=notes))
-        title = (sec.get("title") or f"Секция {si}").strip()
+        title = (sec.get("title") or f"Section {si}").strip()
         if topics:
             sections.append(Section(id=f"s{si}", title=title, topics=topics))
     if not sections:
-        raise ValueError("Из текста гайда не удалось извлечь ни одной темы")
+        raise ValueError("Could not extract a single topic from the guide text")
     return Guide(
         guide_id=datetime.now().strftime("g-%Y%m%d-%H%M%S"),
-        language=(parsed.get("language") or "ru").strip().lower()[:5],
-        title=(parsed.get("title") or "Гайд интервью").strip(),
+        language=(parsed.get("language") or "en").strip().lower()[:5],
+        title=(parsed.get("title") or "Interview guide").strip(),
         sections=sections,
     )

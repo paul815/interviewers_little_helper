@@ -1,14 +1,14 @@
-"""Потоковое детектирование границ реплик: поток аудио -> события речи.
+"""Streaming detection of utterance boundaries: an audio stream -> speech events.
 
-Отличие от `vad.py`: тот пересчитывает разметку речи по всему буферу заново на
-каждом опросе (батчевый `speech_regions`), здесь каждый кадр обрабатывается
-ровно один раз, а конец реплики становится известен через `vad_redemption_s`
-после того, как человек замолчал — не дожидаясь, пока буфер дорастёт до
-`max_chunk_s`. Именно на этом держится низкая задержка транскрипта.
+The difference from `vad.py`: that one re-annotates speech across the whole
+buffer from scratch on every poll (the batch `speech_regions`), whereas here each
+frame is processed exactly once and the end of an utterance becomes known
+`vad_redemption_s` after the person fell silent — without waiting for the buffer
+to grow to `max_chunk_s`. This is exactly what keeps the transcript latency low.
 
-Модуль намеренно не зависит ни от onnxruntime, ни от аудио-железа: машина
-состояний и энергетический источник событий тестируются в чистом виде.
-Silero-реализация живёт в `silero_stream.py` и подключается лениво.
+The module deliberately depends on neither onnxruntime nor audio hardware: the
+state machine and the energy event source are testable in isolation. The Silero
+implementation lives in `silero_stream.py` and is imported lazily.
 """
 from __future__ import annotations
 
@@ -21,25 +21,26 @@ import numpy as np
 log = logging.getLogger("ilh.vad")
 
 SAMPLE_RATE = 16000
-# Родной размер кадра Silero VAD на 16 kHz (32 мс). Тот же кадр используется и
-# энергетическим источником, чтобы учёт сэмплов в машине состояний был единым.
+# The native frame size of Silero VAD at 16 kHz (32 ms). The energy source uses
+# the same frame so that sample accounting in the state machine stays uniform.
 FRAME_SAMPLES = 512
 
 
 @dataclass(frozen=True)
 class SpeechStart:
-    """Начало реплики. `timestamp_samples` — позиция в потоке (не wall-clock)."""
+    """The start of an utterance. `timestamp_samples` is a position in the stream
+    (not wall-clock)."""
 
     timestamp_samples: int
 
 
 @dataclass(frozen=True)
 class SpeechEnd:
-    """Конец реплики: тишина держалась `vad_redemption_s`.
+    """The end of an utterance: silence held for `vad_redemption_s`.
 
-    `end_timestamp_samples` указывает на момент, когда речь смолкла, — окно
-    «искупления» из него уже вычтено, поэтому потребителю нужен собственный
-    post-pad, иначе срежется хвостовой согласный.
+    `end_timestamp_samples` points at the moment speech stopped — the redemption
+    window has already been subtracted from it, so the consumer needs its own
+    post-pad or the trailing consonant gets clipped.
     """
 
     start_timestamp_samples: int
@@ -51,34 +52,35 @@ SpeechEvent = SpeechStart | SpeechEnd
 
 @runtime_checkable
 class SpeechEventSource(Protocol):
-    """Контракт источника событий речи. Реализации: Silero (onnx) и энергия."""
+    """The contract of a speech-event source. Implementations: Silero (onnx) and energy."""
 
     @property
     def in_speech(self) -> bool:
-        """Идёт ли реплика прямо сейчас."""
+        """Whether an utterance is in progress right now."""
 
     def process(self, samples: np.ndarray) -> list[SpeechEvent]:
-        """Скормить очередной блок аудио произвольной длины."""
+        """Feed in the next block of audio, of arbitrary length."""
 
     def flush(self) -> list[SpeechEvent]:
-        """Закрыть незавершённую реплику при остановке потока."""
+        """Close the unfinished utterance when the stream stops."""
 
     def reset(self) -> None:
         ...
 
 
 class SpeechStateMachine:
-    """Гистерезис + окно «искупления» + фильтр минимальной длительности.
+    """Hysteresis plus a redemption window plus a minimum-duration filter.
 
-    Принимает вероятность речи покадрово, отдаёт события. Логика и дефолты
-    повторяют обкатанную схему Silero-обвязок (silero-rs, FluidAudio):
+    Takes a speech probability frame by frame and emits events. The logic and the
+    defaults follow the well-worn scheme of the Silero wrappers (silero-rs,
+    FluidAudio):
 
-    - два порога: войти в речь труднее (`positive`), чем в ней остаться
-      (`negative`) — без этого детектор «мигает» на границе;
-    - `redemption` переживает паузы внутри фразы: реплика не рвётся на части
-      каждый раз, когда человек переводит дыхание;
-    - `min_speech` отсекает щелчки и причмокивания, на которых Silero
-      исправно выдаёт всплески по 40–100 мс.
+    - two thresholds: entering speech is harder (`positive`) than staying in it
+      (`negative`) — without this the detector flickers at the boundary;
+    - `redemption` survives pauses within a phrase: an utterance is not torn
+      apart every time the person takes a breath;
+    - `min_speech` filters out the clicks and lip smacks on which Silero
+      reliably produces 40-100 ms spikes.
     """
 
     def __init__(
@@ -99,7 +101,7 @@ class SpeechStateMachine:
 
     def reset(self) -> None:
         self._in_speech = False
-        self._cursor = 0  # позиция в потоке: сэмплов обработано
+        self._cursor = 0  # position in the stream: samples processed
         self._start: int | None = None
         self._silence_run = 0
         self._speech_run = 0
@@ -113,7 +115,7 @@ class SpeechStateMachine:
         return self._cursor
 
     def advance(self, prob: float) -> list[SpeechEvent]:
-        """Обработать один кадр по его вероятности речи."""
+        """Process one frame given its speech probability."""
         events: list[SpeechEvent] = []
         if self._in_speech:
             self._speech_run += self.frame_samples
@@ -122,7 +124,7 @@ class SpeechStateMachine:
             else:
                 self._silence_run += self.frame_samples
                 if self._silence_run >= self._redemption_samples:
-                    # Речь кончилась там, где началась тишина, а не здесь.
+                    # Speech ended where the silence started, not here.
                     end_at = self._cursor + self.frame_samples - self._silence_run
                     voiced = self._speech_run - self._silence_run
                     if voiced >= self._min_speech_samples and self._start is not None:
@@ -130,8 +132,8 @@ class SpeechStateMachine:
                     self._reset_run()
         elif prob >= self.positive_threshold:
             self._in_speech = True
-            # Началом считаем начало сработавшего кадра; всё, что раньше,
-            # потребитель добирает собственным pre-pad'ом.
+            # The start is the beginning of the frame that fired; anything
+            # earlier the consumer picks up with its own pre-pad.
             self._start = self._cursor
             self._silence_run = 0
             self._speech_run = self.frame_samples
@@ -140,10 +142,10 @@ class SpeechStateMachine:
         return events
 
     def flush(self, extra_samples: int = 0) -> list[SpeechEvent]:
-        """Закрыть текущую реплику концом потока.
+        """Close the current utterance at the end of the stream.
 
-        `extra_samples` — хвост, не набравший полного кадра: потребитель его
-        уже накопил, поэтому в таймштамп он входить обязан.
+        `extra_samples` is the tail that did not make up a full frame: the
+        consumer has already accumulated it, so it must be part of the timestamp.
         """
         events: list[SpeechEvent] = []
         if self._in_speech and self._start is not None:
@@ -159,10 +161,10 @@ class SpeechStateMachine:
 
 
 class _FramedProcessor:
-    """Общая обвязка: блоки произвольной длины -> кадры по `FRAME_SAMPLES`.
+    """The shared wrapper: arbitrary-length blocks -> frames of `FRAME_SAMPLES`.
 
-    Наследник обязан реализовать `_prob(frame)`. Остаток, не набравший кадра,
-    придерживается до следующего вызова, чтобы аудио не терялось на стыках.
+    A subclass must implement `_prob(frame)`. The remainder that does not make up
+    a frame is held back until the next call so no audio is lost at the seams.
     """
 
     def __init__(self, machine: SpeechStateMachine):
@@ -204,17 +206,18 @@ class _FramedProcessor:
 
 
 class EnergyStreamProcessor(_FramedProcessor):
-    """Запасной источник событий на RMS — без модели и без onnxruntime.
+    """A fallback event source built on RMS — no model, no onnxruntime.
 
-    Порог адаптируется к шуму: пока речи нет, скользящее среднее RMS даёт
-    оценку шумового пола. Вероятность отдаётся тремя ступенями, чтобы
-    гистерезис в машине состояний имел смысл: 1.0 — уверенная речь, 0.4 —
-    «серая зона» (реплику продолжает, но не начинает), 0.0 — тишина.
+    The threshold adapts to the noise: while there is no speech, a running mean
+    of the RMS estimates the noise floor. The probability comes in three steps so
+    that the hysteresis in the state machine means something: 1.0 — confident
+    speech, 0.4 — the grey zone (continues an utterance but does not start one),
+    0.0 — silence.
     """
 
-    NOISE_ALPHA = 0.05      # скорость адаптации шумового пола
-    SPEECH_FACTOR = 3.5     # во сколько раз речь громче пола (как в EnergyDetector)
-    SUSTAIN_FACTOR = 0.5    # доля порога, на которой реплика ещё не считается законченной
+    NOISE_ALPHA = 0.05      # how fast the noise floor adapts
+    SPEECH_FACTOR = 3.5     # how many times louder than the floor speech is (as in EnergyDetector)
+    SUSTAIN_FACTOR = 0.5    # the fraction of the threshold at which an utterance is not yet over
 
     def __init__(self, machine: SpeechStateMachine, abs_floor: float = 0.006):
         super().__init__(machine)
@@ -238,7 +241,8 @@ class EnergyStreamProcessor(_FramedProcessor):
 
 
 def create_stream_processor(cfg, kind: str | None = None) -> SpeechEventSource:
-    """Источник событий речи по конфигу: `auto`/`silero-stream` -> Silero, иначе энергия."""
+    """The speech-event source per the config: `auto`/`silero-stream` -> Silero,
+    otherwise energy."""
     kind = kind or cfg.vad
     machine = SpeechStateMachine(
         positive_threshold=cfg.vad_positive_threshold,
@@ -252,11 +256,11 @@ def create_stream_processor(cfg, kind: str | None = None) -> SpeechEventSource:
             from .silero_stream import SileroStreamProcessor
 
             proc = SileroStreamProcessor(machine)
-            log.info("VAD: Silero (потоковый, onnx)")
+            log.info("VAD: Silero (streaming, onnx)")
             return proc
         except Exception as e:
             if kind != "auto":
                 raise
-            log.warning("Silero VAD недоступен (%s) — переключаюсь на энергетический", e)
-    log.info("VAD: энергетический (запасной, потоковый)")
+            log.warning("Silero VAD is unavailable (%s) — switching to the energy one", e)
+    log.info("VAD: energy (fallback, streaming)")
     return EnergyStreamProcessor(machine)

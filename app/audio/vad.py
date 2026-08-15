@@ -1,5 +1,6 @@
-"""Детекторы речи. Основной — Silero VAD (ONNX-модель из пакета faster-whisper,
-без torch); запасной — энергетический, если Silero недоступен."""
+"""Speech detectors. The main one is Silero VAD (the ONNX model from the
+faster-whisper package, no torch); the fallback is energy-based, for when Silero
+is unavailable."""
 from __future__ import annotations
 
 import logging
@@ -15,12 +16,12 @@ SAMPLE_RATE = 16000
 class SpeechDetector(ABC):
     @abstractmethod
     def speech_regions(self, audio: np.ndarray) -> list[tuple[float, float]]:
-        """Интервалы речи (start_s, end_s) в буфере 16 kHz float32."""
+        """Speech intervals (start_s, end_s) within a 16 kHz float32 buffer."""
 
 
 class SileroDetector(SpeechDetector):
     def __init__(self, threshold: float = 0.4):
-        from faster_whisper import vad as fw_vad  # проверяем доступность при создании
+        from faster_whisper import vad as fw_vad  # check availability at construction time
 
         self._fw_vad = fw_vad
         self._options = self._build_options(
@@ -31,8 +32,8 @@ class SileroDetector(SpeechDetector):
         )
 
     def _build_options(self, **desired):
-        """VadOptions отличается между версиями faster-whisper (dataclass /
-        NamedTuple, разный набор полей) — передаём только существующие."""
+        """VadOptions differs between faster-whisper versions (dataclass /
+        NamedTuple, different field sets) — pass only the fields that exist."""
         import dataclasses
 
         opt_cls = self._fw_vad.VadOptions
@@ -52,7 +53,7 @@ class SileroDetector(SpeechDetector):
 
 
 class EnergyDetector(SpeechDetector):
-    """Простой RMS-детектор: фолбэк и инструмент для тестов."""
+    """A simple RMS detector: the fallback, and a tool for tests."""
 
     def __init__(self, frame_ms: int = 30, abs_floor: float = 0.006, merge_gap_s: float = 0.3):
         self.frame = int(SAMPLE_RATE * frame_ms / 1000)
@@ -69,8 +70,8 @@ class EnergyDetector(SpeechDetector):
         thr = max(self.abs_floor, noise * 3.5)
         active = rms > thr
         if not active.any() and noise > self.abs_floor:
-            # Буфер громкий целиком (непрерывная речь): адаптивный порог,
-            # построенный от «шумового пола», оказался выше сигнала.
+            # The whole buffer is loud (continuous speech): the adaptive
+            # threshold built from the "noise floor" ended up above the signal.
             active = rms > self.abs_floor
 
         regions: list[tuple[float, float]] = []
@@ -103,6 +104,6 @@ def create_detector(kind: str = "auto") -> SpeechDetector:
         except Exception as e:
             if kind == "silero":
                 raise
-            log.warning("Silero VAD недоступен (%s) — переключаюсь на энергетический", e)
-    log.info("VAD: энергетический (запасной)")
+            log.warning("Silero VAD is unavailable (%s) — switching to the energy one", e)
+    log.info("VAD: energy (fallback)")
     return EnergyDetector()

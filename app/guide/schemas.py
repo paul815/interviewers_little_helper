@@ -1,4 +1,4 @@
-"""Pydantic-модели структурированного гайда."""
+"""Pydantic models of the structured guide."""
 from __future__ import annotations
 
 from typing import Literal
@@ -21,7 +21,7 @@ class Section(BaseModel):
 
 class Guide(BaseModel):
     guide_id: str
-    language: str = "ru"
+    language: str = "en"
     title: str = ""
     sections: list[Section] = Field(default_factory=list)
 

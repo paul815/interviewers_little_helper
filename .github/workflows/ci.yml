@@ -4,13 +4,13 @@ on:
   push:
   pull_request:
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
-  tests:
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
-    runs-on: ${{ matrix.os }}
+  lint:
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -18,4 +18,34 @@ jobs:
           python-version: "3.11"
           cache: pip
       - run: pip install -r requirements-ci.txt
-      - run: python -m pytest tests/ -q
+      - run: ruff check .
+      # The front end has no unit tests (a flat script with no exports), so at
+      # least the syntax is checked: a broken app.js takes the whole app down.
+      - run: node --check app/web/app.js
+
+  tests:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            python: "3.11"
+            coverage: true
+          - os: ubuntu-latest
+            python: "3.12"
+          - os: macos-latest
+            python: "3.11"
+          - os: windows-latest
+            python: "3.11"
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+      - run: pip install -r requirements-ci.txt
+      - if: ${{ !matrix.coverage }}
+        run: python -m pytest tests/ -q
+      - if: ${{ matrix.coverage }}
+        run: python -m pytest tests/ -q --cov=app --cov-report=term-missing

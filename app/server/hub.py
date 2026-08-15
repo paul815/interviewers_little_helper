@@ -1,6 +1,6 @@
-"""WebSocket-хаб: рассылка событий всем подключённым окнам UI.
+"""WebSocket hub: broadcasts events to every connected UI window.
 
-Работает и из asyncio-кода, и из рабочих потоков (broadcast_threadsafe).
+Works both from asyncio code and from worker threads (broadcast_threadsafe).
 """
 from __future__ import annotations
 
@@ -23,7 +23,7 @@ class WsHub:
     async def register(self, ws: WebSocket) -> None:
         await ws.accept()
         self._clients.add(ws)
-        log.debug("WS-клиент подключён (всего %d)", len(self._clients))
+        log.debug("WS client connected (%d in total)", len(self._clients))
 
     def unregister(self, ws: WebSocket) -> None:
         self._clients.discard(ws)

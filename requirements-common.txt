@@ -1,21 +1,35 @@
-# Общие зависимости (обе платформы)
-fastapi>=0.111
-uvicorn[standard]>=0.30
-httpx>=0.27
-pydantic>=2.7
-numpy>=1.26
-sounddevice>=0.4.7
-soxr>=0.4
-# Parakeet TDT v3 — основной ASR-бэкенд: примерно на порядок быстрее Whisper и
-# в int8 на CPU не занимает VRAM (её целиком забирает LLM). [hub] — скачивание
-# весов с HuggingFace при первом запуске.
-onnx-asr[cpu,hub]>=0.11
-# Потоковый Silero VAD гоняем сами (app/audio/silero_stream.py); тот же
-# onnxruntime, который и так тянет onnx-asr с faster-whisper. ВАЖНО: не менять
-# на onnxruntime-gpu — CPU- и GPU-сборки в одном окружении конфликтуют.
-onnxruntime>=1.17
-# faster-whisper остаётся переключаемой опцией (asr.backend: faster): он умеет
-# словарь терминов через initial_prompt и языки вне 25 европейских, которые
-# покрывает Parakeet. На Windows/NVIDIA работает через CUDA.
-faster-whisper>=1.0.3,<2
-pywebview>=5.1
+# Shared dependencies (all platforms).
+#
+# The versions are pinned exactly (==) rather than with >=. The application
+# listens to a microphone and stores interview transcripts, so "whatever is
+# latest on PyPI gets installed" is an unacceptable policy: any update to any
+# transitive dependency lands on the researcher's machine without review. The
+# pinned set is the one the tests are green on and the manual blocks of
+# docs/TESTING.md section 4 have been run against.
+#
+# How to update: raise the version here, run pytest on all three operating
+# systems, go through the manual blocks, and only then commit.
+fastapi==0.141.1
+uvicorn[standard]==0.52.1
+httpx==0.28.1
+pydantic==2.13.4
+numpy==2.5.1
+sounddevice==0.5.5
+soxr==1.1.0
+# Parakeet TDT v3 — the main ASR backend: roughly an order of magnitude faster
+# than Whisper, and in int8 on CPU it takes no VRAM (the LLM takes all of it).
+# [hub] is the download of the weights from HuggingFace on first launch.
+onnx-asr[cpu,hub]==0.12.0
+# We fetch the weights ourselves through snapshot_download at a pinned revision
+# (app/asr/parakeet_backend.py), so huggingface_hub is a direct dependency.
+huggingface_hub==1.27.0
+# We run the streaming Silero VAD ourselves (app/audio/silero_stream.py); the
+# same onnxruntime that onnx-asr and faster-whisper pull in anyway. IMPORTANT:
+# do not swap it for onnxruntime-gpu — the CPU and GPU builds conflict in one
+# environment.
+onnxruntime==1.28.0
+# faster-whisper stays available as an option (asr.backend: faster): it supports
+# a term vocabulary via initial_prompt, and languages beyond the 25 European ones
+# Parakeet covers. On Windows/NVIDIA it runs through CUDA.
+faster-whisper==1.2.1
+pywebview==6.2.1

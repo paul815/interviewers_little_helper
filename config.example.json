@@ -1,5 +1,9 @@
 {
   "server": { "host": "127.0.0.1", "port": 8756 },
+  "security": {
+    "allowed_hosts": ["127.0.0.1", "localhost", "::1"],
+    "require_origin": false
+  },
   "analysis": {
     "interval_s": 240,
     "max_recommendations": 6,
@@ -31,6 +35,7 @@
     "mlx_model": "mlx-community/whisper-large-v3-turbo",
     "parakeet_model": "nemo-parakeet-tdt-0.6b-v3",
     "parakeet_quantization": "int8",
+    "parakeet_revision": "8f23f0c03c8761650bdb5b40aaf3e40d2c15f1ce",
     "providers": ["CPUExecutionProvider"],
     "compute_type": "auto",
     "beam_size": 1,
@@ -46,6 +51,19 @@
     "request_timeout_s": 300,
     "max_delta_chars": 12000
   },
-  "storage": { "sessions_dir": "sessions", "guides_dir": "guides", "save_audio_chunks": false },
+  "storage": {
+    "sessions_dir": "sessions", "guides_dir": "guides",
+    "prompts_file": "prompts.json", "save_audio": true
+  },
+  "window": {
+    "half_screen": true,
+    "width": 1280,
+    "height": 1440,
+    "min_width": 420,
+    "min_height": 300,
+    "resizable": true,
+    "on_top": true,
+    "remember_size": true
+  },
   "log_level": "INFO"
 }

@@ -1,10 +1,10 @@
-"""Хранилище транскрипта: потокобезопасный список сегментов + дельта-курсор
-для движка покрытия + подписчики (диск, WebSocket)."""
+"""Transcript storage: a thread-safe list of segments plus a delta cursor for
+the coverage engine plus subscribers (disk, WebSocket)."""
 from __future__ import annotations
 
 import logging
 import threading
-from typing import Callable
+from collections.abc import Callable
 
 from ..domain import Segment, Speaker
 
@@ -20,7 +20,9 @@ class TranscriptStore:
     def add_listener(self, fn: Callable[[Segment], None]) -> None:
         self._listeners.append(fn)
 
-    def add(self, speaker: Speaker, t0: float, t1: float, text: str, language: str | None) -> Segment:
+    def add(
+        self, speaker: Speaker, t0: float, t1: float, text: str, language: str | None
+    ) -> Segment:
         with self._lock:
             seg = Segment(
                 id=len(self._segments) + 1,
@@ -31,7 +33,7 @@ class TranscriptStore:
             try:
                 fn(seg)
             except Exception:
-                log.exception("Подписчик транскрипта упал на сегменте %d", seg.id)
+                log.exception("A transcript subscriber failed on segment %d", seg.id)
         return seg
 
     def all_segments(self) -> list[Segment]:
@@ -43,8 +45,8 @@ class TranscriptStore:
             return sorted(self._segments[-n:], key=lambda s: s.t0)
 
     def delta_since(self, cursor: int) -> tuple[list[Segment], int]:
-        """Сегменты, добавленные после cursor (по порядку добавления),
-        отсортированные хронологически; возвращает новый курсор."""
+        """Segments added after cursor (in insertion order), sorted
+        chronologically; returns the new cursor."""
         with self._lock:
             delta = self._segments[cursor:]
             new_cursor = len(self._segments)

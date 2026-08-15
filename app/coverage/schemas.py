@@ -1,8 +1,9 @@
-"""Схемы движка покрытия: состояние, ответ LLM, рекомендации.
+"""Schemas of the coverage engine: state, LLM response, recommendations.
 
-Расширяемость: новые типы рекомендаций (например, пробинг-вопросы) добавляются
-в RECOMMENDATION_TYPES — схема ответа LLM собирается из этого списка, движок
-трактует type как открытую категорию, фронт рендерит неизвестные типы общим видом.
+Extensibility: new recommendation types (probe questions, for example) are added
+to RECOMMENDATION_TYPES — the LLM response schema is built from that list, the
+engine treats type as an open category, and the front end renders unknown types
+with a generic look.
 """
 from __future__ import annotations
 
@@ -22,7 +23,7 @@ class TopicState(BaseModel):
     confidence: float | None = None
     evidence: str | None = None
     last_update_iteration: int = 0
-    manual: bool = False  # выставлено исследователем вручную — LLM не переопределяет
+    manual: bool = False  # set by the researcher by hand — the LLM does not override it
 
 
 class CoverageState(BaseModel):
@@ -56,11 +57,11 @@ class Recommendation(BaseModel):
     urgency: Literal["high", "normal"] = "normal"
     note: str = ""
     suggested_question: str | None = None
-    quote: str | None = None  # для probe: реплика-триггер
+    quote: str | None = None  # for probe: the trigger utterance
 
 
 class Finding(BaseModel):
-    """Тезис «что узнали по теме» — собирается финальным проходом для отчёта."""
+    """A "what we learned about the topic" point — gathered by the final pass for the report."""
 
     model_config = ConfigDict(extra="ignore")
 
@@ -92,7 +93,7 @@ _TOPIC_UPDATES_SCHEMA = {
 
 
 def build_live_schema() -> dict:
-    """Схема ответа обычного/сверочного цикла (без $ref — совместимее)."""
+    """Response schema of the regular/reconcile cycle (no $ref — more compatible)."""
     return {
         "type": "object",
         "properties": {
@@ -118,7 +119,7 @@ def build_live_schema() -> dict:
 
 
 def build_final_schema() -> dict:
-    """Схема финального прохода: обновления статусов + тезисы для отчёта."""
+    """Schema of the final pass: status updates plus points for the report."""
     return {
         "type": "object",
         "properties": {

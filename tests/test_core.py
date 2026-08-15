@@ -1,4 +1,4 @@
-"""Тесты ядра без тяжёлых зависимостей (ASR/аудио-железо/Ollama не нужны)."""
+"""Core tests without the heavy dependencies (no ASR, audio hardware or Ollama)."""
 from __future__ import annotations
 
 import numpy as np
@@ -14,7 +14,7 @@ from app.audio.speech_events import (
     create_stream_processor,
 )
 from app.audio.vad import EnergyDetector
-from app.config import AudioConfig, AnalysisConfig, LLMConfig
+from app.config import AnalysisConfig, AudioConfig, LLMConfig
 from app.coverage.engine import CoverageEngine
 from app.domain import Speaker
 from app.guide.parser import build_guide
@@ -32,21 +32,21 @@ def test_robust_json_parse_plain():
 
 
 def test_robust_json_parse_fenced_and_prefixed():
-    text = 'Вот ответ:\n```json\n{"a": [1, 2], "b": "x"}\n```\nНадеюсь, помог!'
+    text = 'Here is the answer:\n```json\n{"a": [1, 2], "b": "x"}\n```\nHope that helps!'
     assert robust_json_parse(text) == {"a": [1, 2], "b": "x"}
 
 
 def test_robust_json_parse_think_tags():
-    text = '<think>Так, тема s1.t1 — {"вложенный": "мусор"}</think>{"ok": true}'
+    text = '<think>Right, topic s1.t1 — {"nested": "garbage"}</think>{"ok": true}'
     assert robust_json_parse(text) == {"ok": True}
 
 
 def test_robust_json_parse_garbage():
     with pytest.raises(ValueError):
-        robust_json_parse("никакого джсона тут нет")
+        robust_json_parse("no json here at all")
 
 
-# ----------------------------------------------------------------- чанкер
+# ---------------------------------------------------------------- chunker
 
 def tone(seconds: float, amp: float = 0.1) -> np.ndarray:
     t = np.arange(int(seconds * SR)) / SR
@@ -86,14 +86,14 @@ def test_chunk_cut_on_pause():
 def test_chunk_forced_cut_on_max_length():
     asm = make_assembler(max_chunk_s=5.0)
     chunks = feed_blocks(asm, tone(8.0))
-    assert chunks, "непрерывная речь длиннее max_chunk_s должна порезаться"
+    assert chunks, "continuous speech longer than max_chunk_s must be cut up"
     assert len(chunks[0].audio) / SR >= 4.0
 
 
 def test_chunk_flush_returns_tail():
     asm = make_assembler()
     got = feed_blocks(asm, np.concatenate([silence(0.5), tone(1.5)]))
-    assert got == []  # пауза после речи ещё не наступила
+    assert got == []  # the pause after the speech has not arrived yet
     final = asm.flush()
     assert final is not None
     assert 1.0 <= len(final.audio) / SR <= 2.2
@@ -105,7 +105,7 @@ def test_silence_only_never_chunks():
     assert asm.flush() is None
 
 
-# ------------------------------------------------------- потоковый VAD
+# ------------------------------------------------------- streaming VAD
 
 def make_machine(**overrides) -> SpeechStateMachine:
     params = dict(min_speech_s=0.25, redemption_s=0.6)
@@ -121,7 +121,7 @@ def run_probs(machine: SpeechStateMachine, probs: list[float]) -> list:
 
 
 def frames(seconds: float) -> int:
-    """Сколько кадров VAD укладывается в отрезок времени."""
+    """How many VAD frames fit into a stretch of time."""
     return int(seconds * SR / FRAME_SAMPLES)
 
 
@@ -131,23 +131,23 @@ def test_state_machine_emits_start_and_end():
     assert [type(e) for e in events] == [SpeechStart, SpeechEnd]
     start, end = events
     assert start.timestamp_samples == 0
-    # Конец реплики — там, где началась тишина, а не там, где сработал redemption.
+    # The utterance ends where the silence began, not where redemption fired.
     assert abs(end.end_timestamp_samples - 1.0 * SR) < 0.05 * SR
 
 
 def test_state_machine_redemption_survives_pause_inside_phrase():
-    """Пауза короче redemption не рвёт реплику на две."""
+    """A pause shorter than redemption does not tear an utterance in two."""
     machine = make_machine()
     events = run_probs(
         machine,
         [0.9] * frames(0.5) + [0.0] * frames(0.4) + [0.9] * frames(0.5) + [0.0] * frames(1.0),
     )
     assert [type(e) for e in events] == [SpeechStart, SpeechEnd]
-    assert events[1].end_timestamp_samples > 1.3 * SR  # обе половины внутри одной реплики
+    assert events[1].end_timestamp_samples > 1.3 * SR  # both halves inside one utterance
 
 
 def test_state_machine_hysteresis_sustains_on_marginal_frames():
-    """Вероятность между порогами реплику продолжает, но не начинает."""
+    """A probability between the thresholds continues an utterance but does not start one."""
     machine = make_machine()
     assert run_probs(machine, [0.4] * frames(1.0)) == []
     events = run_probs(machine, [0.9] * frames(0.5) + [0.4] * frames(1.0) + [0.0] * frames(1.0))
@@ -156,7 +156,7 @@ def test_state_machine_hysteresis_sustains_on_marginal_frames():
 
 
 def test_state_machine_drops_too_short_speech():
-    """Щелчок короче min_speech даёт SpeechStart, но не SpeechEnd."""
+    """A click shorter than min_speech gives a SpeechStart but no SpeechEnd."""
     machine = make_machine()
     events = run_probs(machine, [0.9] * frames(0.1) + [0.0] * frames(1.0))
     assert [type(e) for e in events] == [SpeechStart]
@@ -181,7 +181,7 @@ def test_energy_processor_ignores_quiet_noise():
     assert not proc.in_speech
 
 
-# ------------------------------------------- потоковая нарезка на чанки
+# ------------------------------------------------ streaming chunk cutting
 
 def make_stream_assembler(**overrides) -> StreamingChunkAssembler:
     cfg = AudioConfig(vad="energy-stream", **overrides)
@@ -189,13 +189,13 @@ def make_stream_assembler(**overrides) -> StreamingChunkAssembler:
 
 
 def test_stream_cuts_on_end_of_speech_not_on_max_chunk():
-    """Главный выигрыш: реплика уходит в ASR сразу после паузы."""
+    """The main win: an utterance goes to ASR right after the pause."""
     asm = make_stream_assembler(max_chunk_s=25.0)
     chunks = feed_blocks(asm, np.concatenate([silence(0.5), tone(2.0), silence(1.5)]))
     assert len(chunks) == 1
     ch = chunks[0]
     assert ch.speaker == Speaker.RESPONDENT
-    # Речь идёт с 0.5 до 2.5 c; допуски — на pre/post-pad и кадр VAD.
+    # The speech runs from 0.5 to 2.5 s; the tolerances cover pre/post-pad and the VAD frame.
     assert 0.1 <= ch.t0 <= 0.55
     assert 2.4 <= ch.t1 <= 2.9
     assert abs(len(ch.audio) / SR - (ch.t1 - ch.t0)) < 0.01
@@ -206,41 +206,42 @@ def test_stream_two_replies_split_by_pause():
     audio = np.concatenate([tone(1.0), silence(1.2), tone(1.0), silence(1.2)])
     chunks = feed_blocks(asm, audio)
     assert len(chunks) == 2
-    assert chunks[0].t1 < chunks[1].t0  # не перекрываются
+    assert chunks[0].t1 < chunks[1].t0  # they do not overlap
 
 
 def test_stream_forced_cut_on_monologue_without_overlap():
-    """Монолог режется по max_chunk_s, но без дублей и дыр на стыке."""
+    """A monologue is cut by max_chunk_s, but with no duplication or gaps at the seam."""
     asm = make_stream_assembler(max_chunk_s=3.0)
     chunks = feed_blocks(asm, np.concatenate([tone(8.0), silence(1.5)]))
     assert len(chunks) >= 2
-    for prev, nxt in zip(chunks, chunks[1:]):
-        assert abs(nxt.t0 - prev.t1) < 0.35, "на стыке не должно быть ни дыры, ни перекрытия"
+    for prev, nxt in zip(chunks, chunks[1:], strict=False):
+        assert abs(nxt.t0 - prev.t1) < 0.35, "the seam must have neither a gap nor an overlap"
 
 
 def test_stream_timestamps_do_not_drift_over_many_feeds():
-    """t0/t1 — абсолютные секунды от старта захвата: дрейф сломал бы порядок
-    реплик между каналами (они сортируются по t0)."""
+    """t0/t1 are absolute seconds from the start of capture: drift would break the
+    order of utterances across the channels (they are sorted on t0)."""
     asm = make_stream_assembler()
     audio = np.concatenate([tone(0.8), silence(1.2)] * 20)
     chunks = feed_blocks(asm, audio, block_s=0.1)
     assert len(chunks) == 20
     for i, ch in enumerate(chunks):
         expected_start = i * 2.0
-        assert abs(ch.t0 - expected_start) < 0.4, f"чанк {i}: t0={ch.t0}, ждали ~{expected_start}"
+        assert abs(ch.t0 - expected_start) < 0.4, \
+            f"chunk {i}: t0={ch.t0}, expected ~{expected_start}"
     assert chunks == sorted(chunks, key=lambda c: c.t0)
 
 
 def test_stream_is_sample_exact():
-    """Строгая версия проверки стыков: ни один сэмпл не отдан дважды и ни один
-    сэмпл речи не потерян.
+    """The strict version of the seam check: no sample is handed out twice and no
+    sample of speech is lost.
 
-    Проверяется на шуме с огибающей — каждый сэмпл уникален, поэтому содержимое
-    чанка можно сверить с источником точным равенством, а не «примерно по
-    длительности». Блоки подаются рваными (вплоть до одного сэмпла), чтобы
-    задеть придержанный хвост неполного кадра VAD. `max_chunk_s` мал, а один
-    участок речи длинный — значит, обязательно случится принудительный разрез,
-    ради которого и заведён `_emitted_through`.
+    It is checked on shaped noise — every sample is unique, so a chunk's contents
+    can be compared with the source by exact equality rather than "roughly by
+    duration". The blocks are fed in ragged sizes (down to a single sample) to
+    hit the held-back tail of an incomplete VAD frame. `max_chunk_s` is small
+    while one stretch of speech is long — so a forced cut is bound to happen, the
+    very thing `_emitted_through` exists for.
     """
     rng = np.random.default_rng(1234)
     spans = [("-", 1.0), ("v", 2.0), ("-", 1.2), ("v", 9.0), ("-", 1.2), ("v", 1.5), ("-", 1.5)]
@@ -263,18 +264,19 @@ def test_stream_is_sample_exact():
     tail = asm.flush()
     if tail is not None:
         chunks.append(tail)
-    assert len(chunks) > 3, "длинный монолог обязан был порезаться на несколько чанков"
+    assert len(chunks) > 3, "a long monologue had to be cut into several chunks"
 
     coverage = np.zeros(len(src), dtype=np.int32)
     for ch in chunks:
         a, b = round(ch.t0 * SR), round(ch.t1 * SR)
-        # t0/t1 честно описывают то, что лежит внутри чанка.
-        assert np.array_equal(ch.audio, src[a:b]), f"чанк {ch.t0:.2f}–{ch.t1:.2f} не совпал с источником"
+        # t0/t1 honestly describe what lies inside the chunk.
+        assert np.array_equal(ch.audio, src[a:b]), \
+            f"chunk {ch.t0:.2f}–{ch.t1:.2f} did not match the source"
         coverage[a:b] += 1
 
-    assert coverage.max() <= 1, "какой-то сэмпл отдан в ASR дважды — слова задвоятся"
+    assert coverage.max() <= 1, "some sample went to ASR twice — words would be doubled"
     for start, end in speech_spans:
-        assert coverage[start:end].all(), f"потеряна речь на {start / SR:.2f}–{end / SR:.2f} c"
+        assert coverage[start:end].all(), f"speech lost at {start / SR:.2f}–{end / SR:.2f} s"
 
 
 def test_stream_flush_returns_tail():
@@ -291,58 +293,58 @@ def test_stream_silence_only_never_chunks():
     assert asm.flush() is None
 
 
-# ------------------------------------------------------------------- гайд
+# ------------------------------------------------------------------ guide
 
 def test_build_guide_assigns_ids():
     parsed = {
-        "title": "Тест",
-        "language": "ru",
+        "title": "Test",
+        "language": "en",
         "sections": [
-            {"title": "Секция А", "topics": [
-                {"question": "Вопрос 1?"},
-                {"question": "Вопрос 2?", "notes": "если молчит — уточнить"},
+            {"title": "Section A", "topics": [
+                {"question": "Question 1?"},
+                {"question": "Question 2?", "notes": "if they go quiet, follow up"},
             ]},
-            {"title": "Пустая", "topics": [{"question": "   "}]},
-            {"title": "Секция Б", "topics": [{"question": "Вопрос 3?"}]},
+            {"title": "Empty", "topics": [{"question": "   "}]},
+            {"title": "Section B", "topics": [{"question": "Question 3?"}]},
         ],
     }
     guide = build_guide(parsed)
     assert [s.id for s in guide.sections] == ["s1", "s3"]
     assert guide.sections[0].topics[0].id == "s1.t1"
-    assert guide.sections[0].topics[1].notes == "если молчит — уточнить"
+    assert guide.sections[0].topics[1].notes == "if they go quiet, follow up"
     assert guide.topic_ids() == ["s1.t1", "s1.t2", "s3.t1"]
 
 
 def test_build_guide_empty_raises():
     with pytest.raises(ValueError):
-        build_guide({"title": "x", "language": "ru", "sections": []})
+        build_guide({"title": "x", "language": "en", "sections": []})
 
 
-# -------------------------------------------------------------- транскрипт
+# ------------------------------------------------------------- transcript
 
 def test_transcript_delta_cursor_and_order():
     store = TranscriptStore()
-    store.add(Speaker.INTERVIEWER, 10.0, 12.0, "поздний", "ru")
-    store.add(Speaker.RESPONDENT, 1.0, 3.0, "ранний", "ru")
+    store.add(Speaker.INTERVIEWER, 10.0, 12.0, "later", "en")
+    store.add(Speaker.RESPONDENT, 1.0, 3.0, "earlier", "en")
     delta, cursor = store.delta_since(0)
-    assert [s.text for s in delta] == ["ранний", "поздний"]
+    assert [s.text for s in delta] == ["earlier", "later"]
     assert cursor == 2
     delta2, cursor2 = store.delta_since(cursor)
     assert delta2 == [] and cursor2 == 2
-    store.add(Speaker.INTERVIEWER, 20.0, 22.0, "новый", "ru")
+    store.add(Speaker.INTERVIEWER, 20.0, 22.0, "newest", "en")
     delta3, _ = store.delta_since(cursor)
-    assert [s.text for s in delta3] == ["новый"]
+    assert [s.text for s in delta3] == ["newest"]
 
 
-# ------------------------------------------------------------------ движок
+# ----------------------------------------------------------------- engine
 
 def make_engine() -> CoverageEngine:
     guide = Guide(
-        guide_id="g-test", language="ru", title="Тест",
+        guide_id="g-test", language="en", title="Test",
         sections=[
-            Section(id="s1", title="Секция", topics=[
-                Topic(id="s1.t1", question="Вопрос один?"),
-                Topic(id="s1.t2", question="Вопрос два?"),
+            Section(id="s1", title="Section", topics=[
+                Topic(id="s1.t1", question="Question one?"),
+                Topic(id="s1.t2", question="Question two?"),
             ]),
         ],
     )
@@ -361,10 +363,11 @@ def test_engine_monotonic_merge():
     eng = make_engine()
     resp = eng._validate({
         "topic_updates": [
-            {"topic_id": "s1.t1", "status": "covered", "evidence": "рассказал", "confidence": 0.9},
-            {"topic_id": "s1.t9", "status": "covered"},   # неизвестный id
+            {"topic_id": "s1.t1", "status": "covered", "evidence": "they explained",
+             "confidence": 0.9},
+            {"topic_id": "s1.t9", "status": "covered"},   # an unknown id
             {"topic_id": "s1.t2", "status": "partial"},
-            "мусор",                                        # невалидный элемент
+            "garbage",                                      # an invalid element
         ],
         "recommendations": [],
     })
@@ -373,7 +376,7 @@ def test_engine_monotonic_merge():
     assert eng.state.topics["s1.t1"].status == "covered"
     assert eng.state.topics["s1.t2"].status == "partial"
 
-    # Понижение статуса игнорируется.
+    # A downgrade of the status is ignored.
     resp2 = eng._validate({
         "topic_updates": [{"topic_id": "s1.t1", "status": "not_covered"}],
         "recommendations": [],
@@ -388,19 +391,19 @@ def test_engine_recommendations_lifecycle():
         "topic_updates": [],
         "recommendations": [
             {"type": "coverage_gap", "topic_id": "s1.t2", "urgency": "normal",
-             "note": "затронуто мельком", "suggested_question": "Расскажите про два?"},
+             "note": "touched on in passing", "suggested_question": "Tell me about two?"},
             {"type": "coverage_gap", "topic_id": "s1.t1", "urgency": "high",
-             "note": "не поднималось", "suggested_question": "Расскажите про один?"},
+             "note": "never came up", "suggested_question": "Tell me about one?"},
         ],
     })
     eng._apply_response(resp)
     recs = eng.current_recommendations()
     assert len(recs) == 2
-    assert recs[0]["topic_id"] == "s1.t1"          # high — первым
-    assert recs[0]["topic_question"] == "Вопрос один?"
-    assert recs[0]["section_title"] == "Секция"
+    assert recs[0]["topic_id"] == "s1.t1"          # high comes first
+    assert recs[0]["topic_question"] == "Question one?"
+    assert recs[0]["section_title"] == "Section"
 
-    # Тема закрылась — её рекомендация исчезает.
+    # The topic closed — its recommendation disappears.
     resp2 = eng._validate({
         "topic_updates": [{"topic_id": "s1.t1", "status": "covered"}],
         "recommendations": [],

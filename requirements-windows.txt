@@ -1,5 +1,10 @@
 -r requirements-common.txt
-# CUDA-библиотеки для faster-whisper (CTranslate2): достаточно pip-пакетов,
-# полный CUDA Toolkit не нужен. Приложение само добавляет их DLL в путь поиска.
-nvidia-cublas-cu12 ; sys_platform == 'win32'
-nvidia-cudnn-cu12>=9 ; sys_platform == 'win32'
+# System audio without a virtual cable: a fork of PyAudio with WASAPI loopback.
+# Plain PortAudio (which sounddevice pulls in) does not expose loopback, see
+# app/audio/loopback.py. The microphone channel stays on sounddevice.
+PyAudioWPatch==0.2.12.8 ; sys_platform == 'win32'
+# The CUDA libraries for faster-whisper (CTranslate2): the pip packages are
+# enough, the full CUDA Toolkit is not needed. The application adds their DLLs to
+# the search path itself.
+nvidia-cublas-cu12==12.9.2.10 ; sys_platform == 'win32'
+nvidia-cudnn-cu12==9.24.0.43 ; sys_platform == 'win32'

@@ -1,12 +1,12 @@
-"""Офлайн-прогон движка покрытия без аудио: текстовый транскрипт скармливается
-батчами, как будто идут 4-минутные циклы. Нужен работающий Ollama.
+"""An offline run of the coverage engine without audio: a text transcript is fed
+in batches, as though 4-minute cycles were going by. A working Ollama is required.
 
-Формат транскрипта — строки вида:
-    И: Расскажите, как вы обычно ...
-    Р: Ну, обычно я ...
-(вместо И/Р можно INTERVIEWER/RESPONDENT)
+The transcript format is lines like:
+    I: Tell me how you usually ...
+    R: Well, usually I ...
+(INTERVIEWER/RESPONDENT may be used instead of I/R)
 
-Пример:
+Example:
     python -m tools.simulate --guide examples/guide.txt --transcript examples/interview.txt
 """
 from __future__ import annotations
@@ -26,9 +26,12 @@ from app.llm.ollama_client import OllamaClient  # noqa: E402
 from app.logging_setup import configure  # noqa: E402
 from app.transcript.store import TranscriptStore  # noqa: E402
 
+# The Cyrillic prefixes stay in place so that transcripts recorded before the
+# interface switched to English still parse.
 PREFIXES = {
-    "и": Speaker.INTERVIEWER, "interviewer": Speaker.INTERVIEWER,
-    "р": Speaker.RESPONDENT, "respondent": Speaker.RESPONDENT,
+    "i": Speaker.INTERVIEWER, "interviewer": Speaker.INTERVIEWER,
+    "r": Speaker.RESPONDENT, "respondent": Speaker.RESPONDENT,
+    "и": Speaker.INTERVIEWER, "р": Speaker.RESPONDENT,
 }
 
 
@@ -48,7 +51,7 @@ def parse_lines(path: Path) -> list[tuple[Speaker, str]]:
 async def notify(type_: str, payload: dict) -> None:
     if type_ == "coverage":
         c = payload["counts"]
-        print(f"\n  покрытие: {c['covered']} covered / {c['partial']} partial / "
+        print(f"\n  coverage: {c['covered']} covered / {c['partial']} partial / "
               f"{c['not_covered']} not_covered")
     elif type_ == "recommendations":
         for r in payload["items"]:
@@ -66,9 +69,10 @@ async def main() -> None:
     parser.add_argument("--guide", type=Path, required=True)
     parser.add_argument("--transcript", type=Path, required=True)
     parser.add_argument("--batch-lines", type=int, default=12,
-                        help="реплик на один цикл анализа (по умолчанию 12)")
+                        help="utterances per analysis cycle (12 by default)")
     parser.add_argument("--final", action="store_true",
-                        help="после всех циклов прогнать финальную сверку и показать findings")
+                        help="after all the cycles, run the final reconciliation "
+                             "and show the findings")
     args = parser.parse_args()
 
     cfg = AppConfig.load()
@@ -77,9 +81,9 @@ async def main() -> None:
 
     check = await llm.check()
     if not check["ok"]:
-        raise SystemExit(f"LLM недоступна: {check['error']}")
+        raise SystemExit(f"The LLM is unavailable: {check['error']}")
 
-    print("Парсинг гайда…")
+    print("Parsing the guide…")
     guide = await parse_guide_text(llm, args.guide.read_text(encoding="utf-8"))
     print(f"«{guide.title}» ({guide.language}):")
     for sec in guide.sections:
@@ -96,25 +100,25 @@ async def main() -> None:
 
     lines = parse_lines(args.transcript)
     if not lines:
-        raise SystemExit("В транскрипте не найдено реплик формата «И: …» / «Р: …»")
+        raise SystemExit("No utterances of the form «I: …» / «R: …» were found in the transcript")
     t = 0.0
     for start in range(0, len(lines), args.batch_lines):
         batch = lines[start : start + args.batch_lines]
         for speaker, text in batch:
             transcript.add(speaker, t, t + 5.0, text, guide.language)
             t += 6.0
-        print(f"\n=== Цикл {start // args.batch_lines + 1}: +{len(batch)} реплик ===")
+        print(f"\n=== Cycle {start // args.batch_lines + 1}: +{len(batch)} utterances ===")
         await engine.analyze(manual=True)
 
     if args.final:
-        print("\n=== Финальная сверка ===")
+        print("\n=== Final reconciliation ===")
         await engine.final_pass()
         for tid, items in engine.findings().items():
             print(f"  {tid}:")
             for f in items:
                 print(f"    - {f}")
 
-    print("\nГотово.")
+    print("\nDone.")
 
 
 if __name__ == "__main__":
