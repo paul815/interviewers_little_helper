@@ -1,8 +1,13 @@
 # Архитектура Interviewer's Little Helper
 
 Документ для разработчика: как устроена система, какие у неё контракты и где её
-расширять. Пользовательская инструкция — в [README.md](../README.md), исходный
-план с бюджетами памяти — в [PLAN.md](../PLAN.md), план тестирования — в
+расширять.
+
+Смежные документы: обзор — [README.md](../README.md); пользовательская инструкция
+— [USER-GUIDE.md](USER-GUIDE.md); ключи конфига с пояснениями —
+[CONFIGURATION.md](CONFIGURATION.md); подробный REST/WS-справочник —
+[API.md](API.md); форматы файлов на диске — [DATA-FORMATS.md](DATA-FORMATS.md);
+исходный план с бюджетами памяти — [PLAN.md](../PLAN.md); план тестирования —
 [TESTING.md](TESTING.md).
 
 ## 1. Обзор
@@ -44,12 +49,18 @@ app/
     data/              silero_vad.onnx (~2.3 МБ, MIT, вендорится в репозиторий)
     vad.py             Батчевый SpeechDetector для запасного пути: Silero / Energy
     chunker.py         StreamingChunkAssembler (основной) + ChunkAssembler + ChunkerThread
+    preprocess.py      HighPass (линейно-фазовый) + normalise_for_asr: кондиционирование
+                       сигнала по пути к VAD и ASR, мимо записи на диск
+    echo.py            EchoDetector: голос респондента, попавший ещё и в микрофон
     recorder.py        SessionRecorder + WavWriter: стерео-запись сессии в audio.wav
   asr/
     base.py            ASRBackend.load()/transcribe() -> ASRResult, warnings()
     parakeet_backend.py Parakeet TDT v3 через onnx-asr (бэкенд по умолчанию)
     faster_backend.py  CTranslate2: cuda->cpu фолбэк, NVIDIA DLL из pip-пакетов
     mlx_backend.py     mlx-whisper (Metal)
+    catalog.py         Модели onnx-asr, о которых мы что-то знаем: ревизия, размер, языки
+    router.py          Язык интервью -> ASRConfig на эту сессию (см. §3.4)
+    weights.py         Скачивание весов с закреплённого коммита, минуя main
     factory.py         Выбор бэкенда по платформе/конфигу
     worker.py          Единственный ASR-поток: очередь чанков -> сегменты
   transcript/store.py  Потокобезопасный список сегментов + дельта-курсоры + подписчики
@@ -146,11 +157,41 @@ PortAudio callback (×2) ──▶ RingBuffer (×2) ──▶ ChunkerThread (×2
 декодирования. Поэтому `poll_interval_s` (0.2 с) заметно меньше
 `vad_redemption_s` (0.6 с): опрос реже съел бы весь выигрыш.
 
+**Что слышит ASR, а чего не слышит файл.** Между кольцом и нарезкой сигнал
+проходит кондиционирование (`audio/preprocess.py`) — единственное место, где
+дорожка на диске и вход моделей расходятся.
+
+| Шаг | Где | Зачем |
+|---|---|---|
+| Хайпасс `audio.highpass_hz` (80 Гц) | `ChunkerThread._pump`, до `feed()` | Постоянная составляющая USB-микрофонов, гул вентиляторов, стук по столу. До VAD, чтобы детектор речи и модель видели один и тот же сигнал. Линейно-фазовый (скользящее среднее, вычтенное из сигнала): биквад смазал бы границы реплики, которые VAD только что измерил. Задержка — половина окна, 2.8 мс; цена — 0.01 % ядра |
+| Подтяжка уровня `asr.input_target_rms` | `ASRWorker._process`, до `transcribe()` | Встроенный микрофон приходит на 20–30 дБ тише гарнитуры. Правится по RMS **готового чанка** — потоковая AGC подстраивалась бы и в тишине, поднимая шумовой пол под нос VAD. Только вверх: перегруженный канал ослаблением не чинится |
+
+`chunk.audio` остаётся таким, каким его захватили: усиленная копия живёт только
+внутри вызова `transcribe()`. На этом держится `chunk.level` — RMS, по которому
+детектор эха сравнивает громкость каналов.
+
+**Эхо между каналами.** Канал респондента — это WASAPI loopback, буквально то,
+что играет устройство вывода. В наушниках на этом всё; на колонках тот же голос
+доходит и до микрофона, и одну фразу распознают оба канала. В транскрипте она
+задваивается, а движок покрытия считает половину ответа сказанной интервьюером.
+`EchoDetector` (`audio/echo.py`) ловит такие пары по Жаккару токенов в окне
+`audio.echo_window_s` и после `audio.echo_min_hits` совпадений один раз
+предупреждает в UI (событие `error`, плюс `audio_warnings` в `meta.json`).
+
+Удалять ничего не удаляет — намеренно. Steno (`stenolabs/stenoai`), откуда взят
+приём, выбрасывает тихую сторону пары, и для блокнота, переписывающего свой файл
+после встречи, это правильно. Здесь сегмент к моменту, когда пара становится
+видна, уже на экране и уже в окне анализа, так что автоматическое решение по
+неоднозначной улике стоило бы дороже задвоенной строки. Уровни каналов идут в
+лог и называют тихую сторону в предупреждении, но решает совпадение текста:
+усиление микрофона и цифровой уровень loopback несравнимы между собой.
+
 ### 3.2 Как пишется аудиодорожка
 
 `SessionRecorder` (`audio/recorder.py`) — второй потребитель того же аудио.
 `ChannelCapture.on_audio` ответвляет блок ровно там, где он кладётся в кольцо
-чанкера, так что в файл попадает то же самое, что слышит ASR. Из
+чанкера — то есть **до** кондиционирования из §3.1: в файле остаётся то, как
+комната звучала на самом деле, а не то, что подали в модель. Из
 аудио-callback'а — только `append` в очередь; PCM16 пишет отдельный поток раз в
 0.5 с. Сбой записи гасит ответвление (`on_audio = None`) и не трогает захват.
 
@@ -189,6 +230,38 @@ PortAudio callback (×2) ──▶ RingBuffer (×2) ──▶ ChunkerThread (×2
 
 `report.md` не восстанавливается — он требует LLM. Итог уходит в UI первым
 снимком состояния (`recovered` в `/api/state`) и показывается строкой статуса.
+
+### 3.4 Выбор модели ASR по языку
+
+Исследователь называет язык на «Старте»; `asr/router.py` превращает это в
+`ASRConfig` ровно на одну сессию (`dataclasses.replace`, глобальный конфиг не
+трогается). Три исхода:
+
+| Язык | Результат | Почему |
+|---|---|---|
+| Есть специализированная модель в каталоге | `parakeet_model` = она | Русский уходит к GigaAM: Parakeet покрывает русский, но хуже |
+| Из 25 языков Parakeet v3 | Parakeet | Быстрый дефолт |
+| Любой другой | `backend="whisper"` | Parakeet на незнакомом языке не падает — он выдаёт беглую бессмыслицу |
+
+Тихий выигрыш — в третьей ветке, но не только там. Whisper определяет язык по
+первым 30 секундам того, что ему дали, а дают ему **один VAD-чанк** — часто
+полторы секунды «ммм». Названный заранее язык убирает подбрасывание монетки,
+которое при неудачном исходе выдаёт уверенный текст не в том алфавите.
+
+Два решения, которые легко откатить по невнимательности:
+
+1. **`backend` в первых двух ветках не трогается.** На `auto` фабрика должна
+   сохранить право уехать на Whisper, если onnx-asr не установлен, а
+   зафиксированный в `config.json` бэкенд должен остаться зафиксированным.
+   Третья ветка — исключение: там переопределяется даже явный выбор.
+2. **`language` записывается всегда**, даже там, где на декодирование он не
+   влияет (Parakeet и GigaAM языко-агностичны на инференсе). Он уезжает в
+   транскрипт, чтобы сессию можно было перечитать, зная, чем её распознавали.
+
+`catalog.py` — единственное место, где про модель известно больше её имени:
+коммит весов, размер загрузки для экрана установки и языки, на которых она
+обучена. Модель не из каталога всё равно запустится — просто приедет с текущего
+main своего репозитория, и размер заранее показать нечем.
 
 ## 4. Движок покрытия
 
@@ -237,6 +310,8 @@ PortAudio callback (×2) ──▶ RingBuffer (×2) ──▶ ChunkerThread (×2
 
 ## 6. REST API (все — `127.0.0.1:8756`)
 
+Ниже — карта целиком; тела запросов, коды ошибок и примеры — в [API.md](API.md).
+
 | Метод и путь | Что делает |
 |---|---|
 | `GET /`, `/app.css`, `/app.js` | статика UI |
@@ -249,7 +324,7 @@ PortAudio callback (×2) ──▶ RingBuffer (×2) ──▶ ChunkerThread (×2
 | `GET /api/prompts` | промпты анализа: `{key, title, hint, default, text, customized, placeholders}` |
 | `PUT /api/prompts/{key}` | `{text}` — сохранить правку; неверные подстановки → `400` с объяснением |
 | `DELETE /api/prompts/{key}` | вернуть дефолт |
-| `GET /api/projects` / `POST /api/projects` | серии: список / создать `{title, guide?, asr_vocabulary?, duration_min?, llm_instructions?}` |
+| `GET /api/projects` / `POST /api/projects` | серии: список / создать `{title, guide?, asr_vocabulary?, asr_language?, duration_min?, llm_instructions?}` |
 | `GET /api/projects/{id}` / `PATCH .../{id}` | пресет проекта; в PATCH `null` = «не трогать поле» |
 | `DELETE /api/projects/{id}` | только пустой проект; с записями — `409` |
 | `GET /api/projects/{id}/sessions` | интервью серии: дата, длительность, покрытие, `has_audio`/`has_transcript` |
@@ -260,7 +335,8 @@ PortAudio callback (×2) ──▶ RingBuffer (×2) ──▶ ChunkerThread (×2
 | `POST /api/projects/{id}/open` | `{session_id?}` — открыть папку в проводнике/Finder |
 | `POST /api/monitor/start` | `{mic_index?, system_index?}` — уровни до старта сессии |
 | `POST /api/monitor/stop` | остановить монитор |
-| `POST /api/session/start` | `{mic_index, system_index, guide, duration_min?, asr_vocabulary?, project_id?, guide_text?}` |
+| `GET /api/asr/languages` | языки интервью: `{code, model, summary, download_mb, ready}` — из этого собран вопрос на «Старте» |
+| `POST /api/session/start` | `{mic_index, system_index, guide, duration_min?, asr_vocabulary?, asr_language?, project_id?, guide_text?}` |
 | `POST /api/session/stop` | остановка: хвост ASR → финальная сверка → отчёт |
 | `POST /api/session/analyze` | ручной запуск цикла |
 | `POST /api/session/flag` | `{note?, anchor?, anchor_section?, topic_id?}` — момент или комментарий под вопросом гайда |
@@ -300,6 +376,9 @@ PortAudio callback (×2) ──▶ RingBuffer (×2) ──▶ ChunkerThread (×2
 хранятся списком (`topicIds`), потому что разбор дробит абзац на несколько тем.
 
 ## 8. Данные на диске
+
+Здесь — инварианты записи и мотивация форматов; поля каждого файла с примерами —
+в [DATA-FORMATS.md](DATA-FORMATS.md).
 
 `projects/<slug>/project.json` — пресет серии `{title, guide, guide_text,
 asr_vocabulary, duration_min, llm_instructions, created_at, updated_at}`;
@@ -351,7 +430,9 @@ prompt_store.py`). Совпавший с дефолтом текст не хра
 ## 9. Конфигурация
 
 `config.json` в корне (см. `config.example.json`) накладывается на дефолты из
-`app/config.py`; неизвестные ключи игнорируются с предупреждением.
+`app/config.py`; неизвестные ключи игнорируются с предупреждением. Таблица ниже
+— сводка; развёрнутые пояснения, компромиссы и рецепты — в
+[CONFIGURATION.md](CONFIGURATION.md).
 
 | Ключ | Дефолт | Смысл |
 |---|---|---|
@@ -370,9 +451,14 @@ prompt_store.py`). Совпавший с дефолтом текст не хра
 | `audio.vad_min_speech_s` | 0.25 | короче — щелчок, не реплика |
 | `audio.vad_redemption_s` | 0.6 | столько тишины = конец реплики; главный рычаг задержки |
 | `audio.watchdog_silence_s` | 12 | нет сэмплов дольше — канал «мёртв» |
-| `asr.backend` | auto | auto/parakeet/mlx/faster/faster-cpu |
-| `asr.parakeet_model` | nemo-parakeet-tdt-0.6b-v3 | любая модель onnx-asr (напр. `gigaam-v2-rnnt`) |
-| `asr.parakeet_quantization` | int8 | int8 ≈ 650 МБ против ~2.4 ГБ fp32 |
+| `audio.highpass_hz` | 80 | хайпасс на пути к VAD и ASR; 0 — выкл. Запись на диске не трогает |
+| `audio.echo_detect` + `echo_window_s / jaccard / min_hits` | true, 1.5 / 0.6 / 2 | ловить голос респондента в микрофоне; предупреждает, не удаляет |
+| `asr.input_target_rms` | 0.05 | к этому RMS подтягивается тихий чанк перед распознаванием; 0 — выкл |
+| `asr.backend` | auto | auto/whisper/parakeet/mlx/faster/faster-cpu; `whisper` = auto без Parakeet |
+| `asr.parakeet_model` | nemo-parakeet-tdt-0.6b-v3 | модель по умолчанию; язык интервью её переопределяет |
+| `asr.parakeet_quantization` | int8 | int8 ≈ 670 МБ против ~2.5 ГБ fp32 |
+| `asr.parakeet_revision` | auto | ревизия весов: `auto` из каталога, `""` — main, либо коммит |
+| `asr.language` | null | чем заполнен вопрос о языке на «Старте» (ISO 639-1); ответ важнее |
 | `asr.providers` | ["CPUExecutionProvider"] | CUDA требует onnxruntime-gpu — см. §11.7 |
 | `asr.model / mlx_model` | large-v3-turbo | модель Whisper (бэкенды mlx/faster) |
 | `asr.compute_type` | auto | cuda→float16, cpu→int8; `int8_float16` для экономии |

@@ -22,9 +22,11 @@ from pathlib import Path
 
 import httpx
 
+from .asr import router
+from .asr.catalog import spec
 from .asr.weights import asr_repo_id as _asr_repo_id
 from .asr.weights import load_pinned_model
-from .config import AppConfig
+from .config import AppConfig, ASRConfig
 
 log = logging.getLogger("ilh.provision")
 
@@ -86,6 +88,27 @@ def asr_ready(repo_id: str | None) -> bool:
     return _dir_bytes(path) >= _ASR_MIN_BYTES
 
 
+def language_options() -> list[dict]:
+    """Every interview language the catalogue covers, the model behind each one,
+    and whether its weights are already on disk.
+
+    The start screen needs that last flag. The ASR model is loaded when a session
+    starts, so choosing a language whose weights are missing would open the
+    interview with a several-hundred-megabyte download — with the respondent
+    already talking. Better to find out while the Start button is still grey.
+    """
+    return [
+        {
+            "code": code,
+            "model": model,
+            "summary": entry.summary if (entry := spec(model)) else model,
+            "download_mb": entry.download_mb if entry else None,
+            "ready": asr_ready(asr_repo_id(model)),
+        }
+        for code, model in sorted(router.languages().items())
+    ]
+
+
 class Provisioner:
     """Background downloading, with the progress relayed to the UI."""
 
@@ -96,6 +119,9 @@ class Provisioner:
         self.hub = hub
         self.llm = llm
         self._task: asyncio.Task | None = None
+        # Which model the screen is currently talking about. The interview
+        # language decides it, so it changes as the researcher picks one.
+        self._asr_cfg: ASRConfig = cfg.asr
         self._items: dict[str, dict] = {
             "asr": self._item("Speech recognition model"),
             "llm": self._item(f"Language model {cfg.llm.model}"),
@@ -119,14 +145,28 @@ class Provisioner:
         self._items[key].update(fields)
         self.hub.broadcast_threadsafe("setup_progress", self.snapshot())
 
-    async def refresh(self) -> dict:
+    def _use_language(self, language: str | None) -> ASRConfig:
+        """Point the ASR item at the model that language would be recognised with."""
+        self._asr_cfg = router.route(self.cfg.asr, language)
+        return self._asr_cfg
+
+    async def refresh(self, language: str | None = None) -> dict:
         """What is there and what is not. Downloads nothing, only looks."""
-        repo = asr_repo_id(self.cfg.asr.parakeet_model)
+        asr_cfg = self._use_language(language)
+        entry = spec(asr_cfg.parakeet_model)
+        repo = asr_repo_id(asr_cfg.parakeet_model)
+        self._items["asr"]["title"] = (
+            entry.summary if entry else f"Speech recognition model {asr_cfg.parakeet_model}"
+        )
         if asr_ready(repo):
             self._items["asr"].update(state="ok", message="downloaded", done_bytes=0)
         else:
             self._items["asr"].update(
-                state="missing", message="about 670 MB", done_bytes=0
+                state="missing",
+                # An unlisted model has no measured size — say so rather than
+                # quote the default model's, which is what used to happen.
+                message=f"about {entry.download_mb} MB" if entry else "size unknown",
+                done_bytes=0,
             )
 
         st = await self.llm.check()
@@ -146,9 +186,11 @@ class Provisioner:
 
     # ------------------------------------------------------------ downloading
 
-    def start(self, items: list[str] | None = None) -> dict:
+    def start(self, items: list[str] | None = None, language: str | None = None) -> dict:
         if self.running:
             return self.snapshot()
+        if language is not None:
+            self._use_language(language)
         wanted = [k for k in (items or self.ITEMS) if k in self._items]
         self._task = asyncio.create_task(self._run(wanted))
         return self.snapshot()
@@ -171,7 +213,7 @@ class Provisioner:
         self.hub.broadcast_threadsafe("setup_progress", self.snapshot())
 
     async def _fetch_asr(self) -> None:
-        repo = asr_repo_id(self.cfg.asr.parakeet_model)
+        repo = asr_repo_id(self._asr_cfg.parakeet_model)
         self._set("asr", state="downloading", message="downloading…", done_bytes=0)
 
         started = asr_cached_bytes(repo) if repo else 0
@@ -196,7 +238,7 @@ class Provisioner:
         self._set("asr", state="ok", message="downloaded")
 
     def _load_asr_blocking(self) -> None:
-        load_pinned_model(self.cfg.asr)
+        load_pinned_model(self._asr_cfg)
 
     async def _pull_llm(self) -> None:
         model = self.cfg.llm.model

@@ -14,7 +14,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel
 
 from ..config import AppConfig
-from ..provision import Provisioner
+from ..provision import Provisioner, language_options
 from ..storage.project_store import ProjectError
 from ..storage.prompt_store import PromptError
 from .controller import AppController, ControllerError
@@ -56,6 +56,7 @@ class SessionStartRequest(BaseModel):
     guide: dict
     duration_min: int | None = None
     asr_vocabulary: str = ""
+    asr_language: str = ""  # ISO 639-1; "" leaves the model choice to config.json
     project_id: str | None = None
     guide_text: str = ""  # the original guide text — this is what the interview screen shows
 
@@ -64,6 +65,7 @@ class ProjectCreateRequest(BaseModel):
     title: str
     guide: dict | None = None
     asr_vocabulary: str = ""
+    asr_language: str = ""
     duration_min: int | None = None
     guide_text: str = ""
     llm_instructions: str = ""
@@ -75,6 +77,7 @@ class ProjectUpdateRequest(BaseModel):
     title: str | None = None
     guide: dict | None = None
     asr_vocabulary: str | None = None
+    asr_language: str | None = None
     duration_min: int | None = None
     guide_text: str | None = None
     llm_instructions: str | None = None
@@ -120,6 +123,7 @@ class QuestionDoneRequest(BaseModel):
 
 class SetupDownloadRequest(BaseModel):
     items: list[str] | None = None
+    language: str = ""  # download the model this interview language needs
 
 
 def create_app(cfg: AppConfig) -> FastAPI:
@@ -213,12 +217,17 @@ def create_app(cfg: AppConfig) -> FastAPI:
     # ------------------------------------------------------ first-run wizard
 
     @app.get("/api/setup/status")
-    async def setup_status():
-        return await provisioner.refresh()
+    async def setup_status(language: str = ""):
+        return await provisioner.refresh(language or None)
 
     @app.post("/api/setup/download")
     async def setup_download(req: SetupDownloadRequest):
-        return provisioner.start(req.items)
+        return provisioner.start(req.items, req.language or None)
+
+    @app.get("/api/asr/languages")
+    async def asr_languages():
+        """What the language selector on the start screen is built from."""
+        return {"languages": language_options(), "configured": cfg.asr.language or ""}
 
     @app.post("/api/guide/parse")
     async def guide_parse(req: GuideParseRequest):
@@ -275,9 +284,16 @@ def create_app(cfg: AppConfig) -> FastAPI:
                 guide = Guide.model_validate(req.guide)
             except Exception as e:
                 raise ControllerError(f"Invalid guide structure: {e}") from e
+        # By keyword: the preset has grown enough fields that a positional call
+        # silently shifts them when a new one lands in the middle.
         return controller.projects.create(
-            req.title, guide, req.asr_vocabulary, req.duration_min,
-            req.guide_text, req.llm_instructions,
+            title=req.title,
+            guide=guide,
+            asr_vocabulary=req.asr_vocabulary,
+            asr_language=req.asr_language,
+            duration_min=req.duration_min,
+            guide_text=req.guide_text,
+            llm_instructions=req.llm_instructions,
         )
 
     @app.get("/api/projects/{project_id}")
@@ -351,7 +367,7 @@ def create_app(cfg: AppConfig) -> FastAPI:
     async def session_start(req: SessionStartRequest):
         return await controller.start_session(
             req.mic_index, req.system_index, req.guide, req.duration_min,
-            req.asr_vocabulary, req.project_id, req.guide_text,
+            req.asr_vocabulary, req.asr_language, req.project_id, req.guide_text,
         )
 
     @app.post("/api/session/flag")

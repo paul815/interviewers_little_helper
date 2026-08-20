@@ -162,7 +162,8 @@
         <div class="row"><span class="lbl">Term vocabulary for recognition</span></div>
         <input id="vocab" type="text"
           placeholder="product names, brands, jargon — comma-separated">
-        <div class="hint">A hint for the recogniser: these words will be recognised more accurately.</div>
+        <div class="hint">A hint for the recogniser: these words will be recognised more accurately.
+          Whisper only — the Parakeet and GigaAM models ignore it.</div>
       </div>
 
       <div class="col">
@@ -278,6 +279,22 @@
     <div class="btnrow end">
       <button id="btn-confirm-no" class="btn">Cancel</button>
       <button id="btn-confirm-yes" class="btn danger">Delete</button>
+    </div>
+  </div>
+</div>
+
+<!-- ============ asked before every recording: what will be spoken ============ -->
+<div id="lang-ask" class="modal hidden">
+  <div class="sheet slim">
+    <div class="sheet-title">What language will this interview be in?</div>
+    <div class="confirm-body">It chooses the recognition model. The answer is remembered
+      for the project, so the next interview in the series opens with it already filled in.</div>
+    <select id="asr-lang"><option value="">— as configured —</option></select>
+    <div id="lang-ask-note" class="hint"></div>
+    <div class="btnrow end">
+      <button id="btn-lang-cancel" class="btn">Cancel</button>
+      <button id="btn-lang-get" class="btn hidden">Download the model</button>
+      <button id="btn-lang-go" class="btn primary">Start recording</button>
     </div>
   </div>
 </div>

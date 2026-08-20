@@ -27,7 +27,12 @@
     "vad_negative_threshold": 0.35,
     "vad_min_speech_s": 0.25,
     "vad_redemption_s": 0.6,
-    "watchdog_silence_s": 12.0
+    "watchdog_silence_s": 12.0,
+    "highpass_hz": 80.0,
+    "echo_detect": true,
+    "echo_window_s": 1.5,
+    "echo_jaccard": 0.6,
+    "echo_min_hits": 2
   },
   "asr": {
     "backend": "auto",
@@ -35,12 +40,13 @@
     "mlx_model": "mlx-community/whisper-large-v3-turbo",
     "parakeet_model": "nemo-parakeet-tdt-0.6b-v3",
     "parakeet_quantization": "int8",
-    "parakeet_revision": "8f23f0c03c8761650bdb5b40aaf3e40d2c15f1ce",
+    "parakeet_revision": "auto",
     "providers": ["CPUExecutionProvider"],
     "compute_type": "auto",
     "beam_size": 1,
     "language": null,
-    "drop_no_speech_prob": 0.85
+    "drop_no_speech_prob": 0.85,
+    "input_target_rms": 0.05
   },
   "llm": {
     "base_url": "http://127.0.0.1:11434",

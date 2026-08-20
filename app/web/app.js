@@ -30,6 +30,7 @@ const S = {
   durationMin: null,
   channels: {},          // interviewer/respondent -> alive
   setup: null,           // {running, items} — state of the model downloads
+  langs: [],             // [{code, model, summary, download_mb, ready}] — /api/asr/languages
   wizardHidden: false,   // "Later" in the wizard: do not show until a reload
   libGuides: [],
   projects: [],
@@ -259,6 +260,10 @@ function renderAll() {
   renderProject();
 }
 
+/** Whether «Start» may be pressed — that is, whether the language dialog may
+ *  open. The model being downloaded is deliberately not a condition here: the
+ *  dialog is where a missing model is reported and fetched, and a grey button
+ *  would leave no way to reach it. */
 function canStart() {
   const mic = $("sel-mic").value, sys = $("sel-sys").value;
   return S.llmOk && S.guideConfirmed && mic !== "" && sys !== "" && mic !== sys;
@@ -834,10 +839,93 @@ const fmtMB = (b) => (b >= 1024 * MB ? (b / 1024 / MB).toFixed(1) + " GB"
 
 async function loadSetupStatus() {
   try {
-    renderSetup(await api("/api/setup/status"));
+    // The language decides which model has to be on disk, so the wizard has to
+    // be asked about that model and not about whatever config.json names.
+    renderSetup(await api("/api/setup/status?language=" + encodeURIComponent(asrLang())));
   } catch (e) {
     $("models-status").textContent = "the check failed";
   }
+}
+
+/* ---- the interview language ---- */
+
+const asrLang = () => $("asr-lang").value;
+
+/** English names for the codes the server offers. Intl knows them all; keeping
+ *  our own table would only mean a second place to forget a language in. */
+const langName = (() => {
+  let names = null;
+  try {
+    names = new Intl.DisplayNames(["en"], { type: "language" });
+  } catch (e) { /* very old engine — fall back to the bare code */ }
+  return (code) => {
+    try {
+      return (names && names.of(code)) || code;
+    } catch (e) {
+      return code;
+    }
+  };
+})();
+
+async function loadLanguages() {
+  let data;
+  try {
+    data = await api("/api/asr/languages");
+  } catch (e) {
+    return;   // the selector keeps its single "as configured" option
+  }
+  S.langs = data.languages || [];
+  const sel = $("asr-lang");
+  const chosen = sel.value || localStorage.getItem("ilh_lang") || data.configured || "";
+  sel.innerHTML = `<option value="">— as configured —</option>` + S.langs
+    .map((l) => ({ ...l, name: langName(l.code) }))
+    .sort((a, b) => a.name.localeCompare(b.name))
+    .map((l) => `<option value="${esc(l.code)}">${esc(l.name)}`
+                + `${l.ready ? "" : ` — ${l.download_mb} MB to download`}</option>`)
+    .join("");
+  sel.value = chosen;
+  if (sel.value !== chosen) sel.value = "";   // a code the server no longer offers
+  if (langAskOpen()) renderLangAsk();
+}
+
+const langAskOpen = () => !$("lang-ask").classList.contains("hidden");
+
+/** The question that opens the recording. It is asked every time on purpose:
+ *  the model cannot be swapped once the session is running, and a series in one
+ *  language costs a single Enter because the answer arrives pre-filled. */
+function askLanguage() {
+  $("lang-ask").classList.remove("hidden");
+  renderLangAsk();
+  $("asr-lang").focus();
+}
+
+function closeLangAsk() {
+  $("lang-ask").classList.add("hidden");
+}
+
+function renderLangAsk() {
+  const chosen = S.langs.find((l) => l.code === asrLang());
+  const go = $("btn-lang-go"), get = $("btn-lang-get");
+  // Readiness comes from the set-up status rather than from S.langs: that status
+  // is already scoped to the chosen language and it updates over the websocket
+  // while a download runs, so the dialog unlocks itself when the model lands.
+  const ready = asrReady();
+  $("lang-ask-note").textContent = !chosen
+    ? "Not specified — recognition will use the model from the settings."
+    : ready
+      ? chosen.summary
+      : `${chosen.summary}. ${chosen.download_mb} MB to download — the recording cannot `
+        + "start until it is here, or the download would run while your respondent talks.";
+  go.disabled = !ready;
+  get.classList.toggle("hidden", ready);
+}
+
+/** Whether the recognition model for the chosen language is already downloaded.
+ *  Unknown (the status has not arrived yet) counts as ready: the check exists to
+ *  stop a known-missing model, not to block the interface on a slow request. */
+function asrReady() {
+  const asr = ((S.setup || {}).items || {}).asr;
+  return !asr || asr.state !== "missing";
 }
 
 function renderSetup(p) {
@@ -881,6 +969,11 @@ function renderSetup(p) {
 
   if (!S.wizardHidden && (missing.length || blocked.length || busy)) showWizard(true);
   if (list.every((it) => it.state === "ok") && !busy) showWizard(false);
+
+  // Progress arrives here over the websocket; the language dialog is waiting on
+  // exactly this to unlock «Start recording».
+  if (langAskOpen()) renderLangAsk();
+  renderHeader();
 }
 
 function showWizard(on) {
@@ -1036,14 +1129,24 @@ function startMsg(text, ok = false) {
 }
 
 /** The readiness line: audio should be fixed before the call, not a minute before it. */
+/** Everything that can stop a recording, named. Anything left off this line
+ *  leaves «Start» grey with nothing on screen to explain why — which is how a
+ *  missing guide used to look. «Recognition» is the one entry that does not
+ *  grey the button: it is enforced a step later, in the language dialog. */
 function renderReady() {
-  const items = (S.setup || {}).items || {};
-  const missing = Object.values(items).filter((it) => it.state === "missing").length;
+  const mic = $("sel-mic").value, sys = $("sel-sys").value;
   const checks = [
-    { name: "Microphone", ok: $("sel-mic").value !== "", why: "no microphone selected" },
-    { name: "System audio", ok: $("sel-sys").value !== "",
-      why: "no system audio selected — the other person's voice will not be recorded" },
-    { name: "Recognition", ok: !S.setup || missing === 0, why: "recognition models are missing" },
+    { name: "Guide", ok: !!S.guideConfirmed, guide: true,
+      why: "no guide confirmed — paste it in «Project settings» and press «Parse the guide»" },
+    { name: "Microphone", ok: mic !== "", why: "no microphone selected" },
+    { name: "System audio", ok: sys !== "" && mic !== sys,
+      why: sys === ""
+        ? "no system audio selected — the other person's voice will not be recorded"
+        : "the microphone and the system audio are the same device" },
+    { name: "Recognition", ok: asrReady(),
+      why: asrLang()
+        ? `the model for ${langName(asrLang())} has not been downloaded`
+        : "the recognition model has not been downloaded" },
     { name: "Hints", ok: S.llmOk, why: "the LLM is not answering — there will be no hints" },
   ];
   const bad = checks.filter((c) => !c.ok);
@@ -1055,8 +1158,12 @@ function renderReady() {
       ? `<button class="btn tiny" id="btn-fix">Fix</button>
          <span class="note">${esc(bad.map((c) => c.why).join("; "))}.</span>`
       : "");
-  // Everything on this line — devices, models, the LLM — is fixed in the ⚙ dialog.
-  if (bad.length) $("btn-fix").addEventListener("click", () => showAppSettings(true));
+  // Devices, models and the LLM live in the ⚙ dialog; the guide does not — it
+  // belongs to the project, so «Fix» has to lead to its tab instead.
+  if (bad.length) {
+    $("btn-fix").addEventListener("click", () =>
+      bad.every((c) => c.guide) ? showTab("setup") : showAppSettings(true));
+  }
 }
 
 /** A session folder is named 2026-08-08_10-15-00. Show it the human way. */
@@ -1219,6 +1326,12 @@ function applyPreset(project) {
     setGuideText(S.guideText);  // the sections are known — rebuild the split
   }
   if (project.asr_vocabulary) $("vocab").value = project.asr_vocabulary;
+  if (project.asr_language) {
+    // Pre-fills the question asked at «Start»; a different project may also need
+    // a different model, so the wizard has to be re-pointed at it.
+    $("asr-lang").value = project.asr_language;
+    loadSetupStatus();
+  }
   // The instructions belong to the project entirely: empty means "there are
   // none", not "leave alone", or they would leak into the next project opened.
   setInstructions(project.llm_instructions || "");
@@ -1292,6 +1405,7 @@ async function createProject() {
         guide: S.guideConfirmed,
         guide_text: $("guide-text").value,
         asr_vocabulary: $("vocab").value.trim(),
+        asr_language: asrLang(),
         duration_min: +$("duration").value || null,
       }),
     });
@@ -1668,27 +1782,41 @@ async function confirmGuide() {
 
 /* -------------------------------------------------------------- actions */
 
+/** «Start» does not start anything on its own: it asks the language first, and
+ *  the dialog starts the session. «Stop» is immediate. */
 async function startStop() {
+  if (S.state === "idle") { askLanguage(); return; }
   const btn = $("btn-startstop");
   btn.disabled = true;
   try {
-    if (S.state === "idle") {
-      await api("/api/session/start", {
-        method: "POST",
-        body: JSON.stringify({
-          mic_index: +$("sel-mic").value,
-          system_index: +$("sel-sys").value,
-          guide: S.guideConfirmed,
-          duration_min: +$("duration").value || null,
-          asr_vocabulary: $("vocab").value.trim(),
-          project_id: S.projectId || null,
-          guide_text: S.guideText || $("guide-text").value,
-        }),
-      });
-      S.monitorOn = false; // the server stopped the monitor itself
-    } else {
-      await api("/api/session/stop", { method: "POST" });
-    }
+    await api("/api/session/stop", { method: "POST" });
+  } catch (e) {
+    setStatus(e.message, true);
+    setupMsg(e.message);
+  } finally {
+    btn.disabled = false;
+    renderHeader();
+  }
+}
+
+async function beginSession() {
+  const btn = $("btn-startstop");
+  btn.disabled = true;
+  try {
+    await api("/api/session/start", {
+      method: "POST",
+      body: JSON.stringify({
+        mic_index: +$("sel-mic").value,
+        system_index: +$("sel-sys").value,
+        guide: S.guideConfirmed,
+        duration_min: +$("duration").value || null,
+        asr_vocabulary: $("vocab").value.trim(),
+        asr_language: asrLang(),
+        project_id: S.projectId || null,
+        guide_text: S.guideText || $("guide-text").value,
+      }),
+    });
+    S.monitorOn = false; // the server stopped the monitor itself
   } catch (e) {
     setStatus(e.message, true);
     setupMsg(e.message);
@@ -1844,7 +1972,7 @@ $("btn-wiz-get").addEventListener("click", async () => {
     .filter(([, it]) => it.state === "missing").map(([k]) => k);
   try {
     renderSetup(await api("/api/setup/download", {
-      method: "POST", body: JSON.stringify({ items: missing }),
+      method: "POST", body: JSON.stringify({ items: missing, language: asrLang() }),
     }));
   } catch (e) {
     setStatus(e.message, true);
@@ -1878,6 +2006,35 @@ $("vocab").value = localStorage.getItem("ilh_vocab") || "";
 $("vocab").addEventListener("change", (e) => {
   localStorage.setItem("ilh_vocab", e.target.value);
   saveProjectPreset({ asr_vocabulary: e.target.value.trim() });
+});
+$("asr-lang").addEventListener("change", async (e) => {
+  localStorage.setItem("ilh_lang", e.target.value);
+  saveProjectPreset({ asr_language: e.target.value });
+  renderLangAsk();          // the note and the buttons follow the choice at once
+  await loadSetupStatus();  // ...and the wizard now watches the new model
+  renderLangAsk();
+  renderHeader();
+});
+$("btn-lang-cancel").addEventListener("click", closeLangAsk);
+$("btn-lang-go").addEventListener("click", () => {
+  closeLangAsk();
+  beginSession();
+});
+$("btn-lang-get").addEventListener("click", async (e) => {
+  const btn = e.currentTarget;
+  btn.disabled = true;
+  $("lang-ask-note").textContent = "Downloading… this runs in the background.";
+  try {
+    // Progress arrives over the websocket as setup_progress and lands in the
+    // wizard; here we only need to know when the model becomes usable.
+    renderSetup(await api("/api/setup/download", {
+      method: "POST", body: JSON.stringify({ items: ["asr"], language: asrLang() }),
+    }));
+  } catch (err) {
+    $("lang-ask-note").textContent = "Could not download: " + err.message;
+  } finally {
+    btn.disabled = false;
+  }
 });
 $("proj-instr").addEventListener("blur", async (e) => {
   const ta = e.target;
@@ -1938,6 +2095,7 @@ $("btn-confirm-no").addEventListener("click", () => closeConfirm(false));
 document.addEventListener("keydown", (e) => {
   if (e.key !== "Escape") return;
   if (confirmResolve) closeConfirm(false);
+  else if (langAskOpen()) closeLangAsk();
   else if (S.viewer) closeViewer();
   else if (appSettingsOpen()) showAppSettings(false);
 });
@@ -1972,6 +2130,8 @@ document.addEventListener("keydown", (e) => {
 connectWS();
 loadDevices();
 checkLLM();
-loadSetupStatus();
+// The languages first: the set-up status is asked about the model the chosen
+// language needs, so the selector has to know its value before that request.
+loadLanguages().then(loadSetupStatus);
 loadLibrary();
 loadProjects();

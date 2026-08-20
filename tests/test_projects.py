@@ -57,7 +57,7 @@ def add_session(store: ProjectStore, project_id: str, name: str, statuses: dict[
 # -------------------------------------------------------------------- store
 
 def test_create_makes_folder_and_preset(store):
-    p = store.create("B2B onboarding", GUIDE, "CRM, LTV", 45)
+    p = store.create("B2B onboarding", GUIDE, asr_vocabulary="CRM, LTV", duration_min=45)
     assert (store.root / p["project_id"] / "sessions").is_dir()
     assert store.load(p["project_id"])["asr_vocabulary"] == "CRM, LTV"
     assert store.load(p["project_id"])["duration_min"] == 45
@@ -76,7 +76,7 @@ def test_create_requires_title(store):
 
 
 def test_update_leaves_untouched_fields_alone(store):
-    p = store.create("Series", GUIDE, "CRM", 45)
+    p = store.create("Series", GUIDE, asr_vocabulary="CRM", duration_min=45)
     store.update(p["project_id"], title="Spring series")
     data = store.load(p["project_id"])
     assert data["title"] == "Spring series"

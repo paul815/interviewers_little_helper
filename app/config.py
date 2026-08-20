@@ -60,22 +60,39 @@ class AudioConfig:
     vad_min_speech_s: float = 0.25        # shorter than this is a click, not an utterance
     vad_redemption_s: float = 0.6         # this much silence ends an utterance
     watchdog_silence_s: float = 12.0  # no samples for longer — the channel counts as dead
+    # High-pass on the way to the VAD and to ASR: DC offset, rumble, fans,
+    # a knock on the desk. 0 switches the filter off. The recording on disk is
+    # never touched by it (see app/audio/preprocess.py).
+    highpass_hz: float = 80.0
+    # Watch for the respondent's voice arriving on the microphone as well —
+    # what happens when the interview is held on speakers instead of
+    # headphones, and what puts every second answer into the transcript twice.
+    # Nothing is deleted; the UI gets one warning (see app/audio/echo.py).
+    echo_detect: bool = True
+    echo_window_s: float = 1.5    # how far apart the two copies may start
+    echo_jaccard: float = 0.6     # token overlap at which they are the same sentence
+    echo_min_hits: int = 2        # one coincidence is a coincidence
 
 
 @dataclass
 class ASRConfig:
-    # auto | parakeet | mlx | faster | faster-cpu
+    # auto | whisper | parakeet | mlx | faster | faster-cpu
+    # ("whisper" is auto without the Parakeet branch — see app/asr/factory.py)
     backend: str = "auto"
     model: str = "large-v3-turbo"
     mlx_model: str = "mlx-community/whisper-large-v3-turbo"
-    # Model for the parakeet backend (onnx-asr). The same key can point at the
-    # Russian gigaam-v2-rnnt — at the cost of mixed RU/EN speech support.
+    # Model for the parakeet backend — any name onnx-asr knows, not just
+    # Parakeet: the Russian gigaam-v3-e2e-rnnt goes in the same field. The ones
+    # we ship pinned and sized are in app/asr/catalog.py. When an interview
+    # language is chosen at the start of a session, the router overrides this
+    # for that session only (app/asr/router.py).
     parakeet_model: str = "nemo-parakeet-tdt-0.6b-v3"
     parakeet_quantization: str = "int8"
-    # Commit of the weights repository on HuggingFace. Without it the current
-    # main is downloaded, i.e. the model contents change without our knowledge.
-    # An empty string unpins it (see app/asr/weights.py).
-    parakeet_revision: str = "8f23f0c03c8761650bdb5b40aaf3e40d2c15f1ce"
+    # Which commit of the weights repository to download. "auto" takes the one
+    # recorded for this model in the catalogue; an empty string tracks the
+    # repository's main and gives up reproducibility; a 40-character sha pins
+    # that commit whatever the catalogue says (see app/asr/weights.py).
+    parakeet_revision: str = "auto"
     # CPU on purpose: int8 Parakeet copes on CPU with room to spare, and all the
     # VRAM stays with the LLM. CUDAExecutionProvider needs onnxruntime-gpu, which
     # conflicts with the CPU build of onnxruntime (pulled in by faster-whisper).
@@ -84,6 +101,9 @@ class ASRConfig:
     beam_size: int = 1
     language: str | None = None  # None = auto-detect per chunk
     drop_no_speech_prob: float = 0.85
+    # Quiet chunks are lifted towards this RMS before recognition (0 = off).
+    # Only upwards: see app/audio/preprocess.py for why loud audio is left alone.
+    input_target_rms: float = 0.05
     # Project terms (brands, jargon, names) separated by commas — a hint for
     # Whisper that markedly improves recognition of exactly those words.
     # Parakeet does not support prompt conditioning: the setting does nothing

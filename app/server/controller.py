@@ -12,6 +12,8 @@ from datetime import datetime
 from functools import partial
 
 from .. import __version__
+from ..asr import router  # a plain table, no onnx-asr behind it
+from ..audio.echo import EchoDetector
 from ..config import AppConfig
 from ..coverage.engine import CoverageEngine
 from ..domain import SPEAKER_FULL, AudioChunk, Speaker
@@ -61,9 +63,11 @@ class SessionRuntime:
         self.t0_mono: float = 0.0
         self.duration_min: int = 60
         self.asr_vocabulary: str = ""
+        self.asr_language: str = ""  # "" — whatever config.json says, no routing
         self.llm_instructions: str = ""  # the project's extra analysis instructions
         self.asr_status: str = "loading"
         self.channel_alive: dict[str, bool] = {}
+        self.echo: EchoDetector | None = None  # None — switched off in the config
 
 
 class AppController:
@@ -154,6 +158,7 @@ class AppController:
         guide_data: dict,
         duration_min: int | None = None,
         asr_vocabulary: str | None = None,
+        asr_language: str | None = None,
         project_id: str | None = None,
         guide_text: str = "",
     ) -> dict:
@@ -189,6 +194,7 @@ class AppController:
             rt = SessionRuntime()
             rt.duration_min = duration_min or self.cfg.analysis.default_duration_min
             rt.asr_vocabulary = (asr_vocabulary or self.cfg.asr.vocabulary).strip()
+            rt.asr_language = router.normalise(asr_language or self.cfg.asr.language) or ""
             rt.guide_text = guide_text or ""
             if project is not None:
                 rt.project_id = project["project_id"]
@@ -236,7 +242,7 @@ class AppController:
         rt.store = SessionStore.create(
             self.cfg,
             {"guide_title": guide.title, "duration_min": rt.duration_min,
-             "asr_vocabulary": rt.asr_vocabulary,
+             "asr_vocabulary": rt.asr_vocabulary, "asr_language": rt.asr_language,
              "project_id": rt.project_id, "project_title": rt.project_title},
             root=self.projects.sessions_root(rt.project_id) if rt.project_id else None,
         )
@@ -253,6 +259,7 @@ class AppController:
                     guide=guide.model_dump(),
                     guide_text=rt.guide_text or None,
                     asr_vocabulary=rt.asr_vocabulary,
+                    asr_language=rt.asr_language,
                     duration_min=rt.duration_min,
                 )
             except ProjectError as e:  # recording the session matters more than the preset
@@ -268,10 +275,30 @@ class AppController:
             rt.asr_status = {"asr_loading": "loading", "asr_ready": "ready"}.get(phase, "error")
             self.hub.broadcast_threadsafe("status", {"message": message, "asr": rt.asr_status})
 
+        if self.cfg.audio.echo_detect:
+            rt.echo = EchoDetector(
+                window_s=self.cfg.audio.echo_window_s,
+                threshold=self.cfg.audio.echo_jaccard,
+                min_hits=self.cfg.audio.echo_min_hits,
+            )
+
         def on_segment(chunk: AudioChunk, text: str, language: str | None) -> None:
             rt.transcript.add(chunk.speaker, chunk.t0, chunk.t1, text, language)
+            if rt.echo is None:
+                return
+            quiet = rt.echo.observe(chunk.speaker, chunk.t0, chunk.t1, text, chunk.level)
+            if quiet is not None:
+                self._audio_warning(
+                    rt,
+                    f"The «{SPEAKER_FULL[quiet]}» channel is also picking up the other "
+                    f"side of the call — the same phrases are landing in the transcript "
+                    f"twice, and the analysis reads them as said by both. Headphones "
+                    f"fix it; nothing is being deleted automatically.",
+                )
 
-        asr_cfg = dataclasses.replace(self.cfg.asr, vocabulary=rt.asr_vocabulary)
+        asr_cfg = router.route(
+            dataclasses.replace(self.cfg.asr, vocabulary=rt.asr_vocabulary), rt.asr_language
+        )
         backend = create_asr_backend(asr_cfg)
         rt.asr_worker = ASRWorker(
             backend, rt.asr_queue, on_segment, asr_status, asr_cfg, rt.thread_stop

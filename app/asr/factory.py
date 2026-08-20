@@ -4,6 +4,11 @@
 than Whisper and takes no VRAM. If onnx-asr is not installed, the old behaviour
 applies: mlx on Apple Silicon, faster-whisper otherwise.
 
+`whisper` is `auto` with the Parakeet branch removed — the fastest Whisper this
+machine can run. The router picks it for interviews in a language no onnx-asr
+model of ours was trained on (app/asr/router.py); naming a concrete backend
+there would cost Apple Silicon its Metal acceleration.
+
 An extension point: on Apple Silicon, Parakeet is noticeably faster through
 parakeet-mlx (Metal) than through onnx-asr (CPU). A separate backend class plus
 a branch below is all that would take; the rest of the code does not depend on
@@ -23,8 +28,8 @@ log = logging.getLogger("ilh.asr")
 
 def create_asr_backend(cfg: ASRConfig) -> ASRBackend:
     backend = cfg.backend
-    if backend == "auto":
-        if _onnx_asr_available():
+    if backend in ("auto", "whisper"):
+        if backend == "auto" and _onnx_asr_available():
             backend = "parakeet"
         elif sys.platform == "darwin" and platform.machine() == "arm64" and _mlx_available():
             backend = "mlx"

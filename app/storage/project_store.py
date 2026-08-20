@@ -123,7 +123,12 @@ class ProjectStore:
         self,
         title: str,
         guide: Guide | None = None,
+        # Keyword-only past this point: the preset keeps gaining fields, and a
+        # new one landing in the middle of a positional call shifts every
+        # argument after it without a word of complaint.
+        *,
         asr_vocabulary: str = "",
+        asr_language: str = "",
         duration_min: int | None = None,
         guide_text: str = "",
         llm_instructions: str = "",
@@ -144,6 +149,9 @@ class ProjectStore:
                 "guide": guide.model_dump() if guide else None,
                 "guide_text": guide_text,
                 "asr_vocabulary": asr_vocabulary,
+                # Interviews in one project are almost always in one language;
+                # remembering it here is what saves picking it every session.
+                "asr_language": asr_language,
                 "duration_min": duration_min,
                 "llm_instructions": llm_instructions,
             }
@@ -157,7 +165,7 @@ class ProjectStore:
     def update(self, project_id: str, **fields) -> dict:
         """A targeted preset update; None means "leave this field alone"."""
         allowed = {
-            "title", "guide", "guide_text", "asr_vocabulary",
+            "title", "guide", "guide_text", "asr_vocabulary", "asr_language",
             "duration_min", "llm_instructions",
         }
         unknown = set(fields) - allowed

@@ -8,6 +8,7 @@ import threading
 import time
 from collections.abc import Callable
 
+from ..audio.preprocess import normalise_for_asr
 from ..config import ASRConfig
 from ..domain import AudioChunk
 from .base import ASRBackend
@@ -72,7 +73,12 @@ class ASRWorker(threading.Thread):
             log.warning("The ASR queue is growing: %d chunks waiting", backlog)
         try:
             t = time.monotonic()
-            result = self.backend.transcribe(chunk.audio)
+            # A quiet channel is lifted for the model only. chunk.audio stays as
+            # captured: the echo detector reads its level afterwards.
+            audio = normalise_for_asr(
+                chunk.audio, self.cfg.input_target_rms, level=chunk.level
+            )
+            result = self.backend.transcribe(audio)
             elapsed = time.monotonic() - t
             text = _WS_RE.sub(" ", result.text).strip()
             if not text:

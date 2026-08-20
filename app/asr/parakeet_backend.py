@@ -16,8 +16,9 @@ The differences from Whisper that matter to the calling code:
 - there is no language detection: Parakeet is multilingual and language-agnostic
   at inference, so we return whatever the config states explicitly.
 
-The same onnx-asr API serves other models too (gigaam-v2-rnnt for Russian, say)
-— it is enough to change `asr.parakeet_model`.
+Despite the name, this backend is not Parakeet-specific — it runs whatever
+`asr.parakeet_model` names, and for a Russian interview the router points that
+at gigaam-v3-e2e-rnnt (app/asr/router.py, app/asr/catalog.py).
 """
 from __future__ import annotations
 
@@ -67,7 +68,9 @@ class ParakeetOnnxBackend(ASRBackend):
         return ASRResult(text=_extract_text(result), language=self.cfg.language)
 
     def describe(self) -> str:
-        return f"parakeet {self.cfg.parakeet_model} ({', '.join(self.cfg.providers)})"
+        # The model name, not "parakeet": this line goes on screen, and on a
+        # Russian interview the model running is GigaAM.
+        return f"onnx-asr {self.cfg.parakeet_model} ({', '.join(self.cfg.providers)})"
 
     def warnings(self) -> list[str]:
         if self.cfg.vocabulary.strip():

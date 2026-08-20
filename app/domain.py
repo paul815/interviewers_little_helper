@@ -26,6 +26,18 @@ class AudioChunk:
     t0: float
     t1: float
 
+    @property
+    def level(self) -> float:
+        """RMS of the chunk as it was captured.
+
+        Measured here, not after audio/preprocess.py has lifted the chunk for
+        ASR: the echo detector compares the loudness of the two channels, and a
+        normalised chunk no longer carries that.
+        """
+        if self.audio.size == 0:
+            return 0.0
+        return float(np.sqrt(np.mean(np.square(self.audio, dtype=np.float64))))
+
 
 @dataclass
 class Segment:

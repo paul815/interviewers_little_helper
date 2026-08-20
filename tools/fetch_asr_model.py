@@ -5,7 +5,7 @@ interview begins with a multi-minute pause for the download, right at the moment
 the respondent is already talking.
 
     python -m tools.fetch_asr_model               # the model from config.json
-    python -m tools.fetch_asr_model --model gigaam-v2-rnnt
+    python -m tools.fetch_asr_model --model gigaam-v3-e2e-rnnt   # the Russian one
 """
 from __future__ import annotations
 
@@ -33,7 +33,8 @@ def main() -> int:
         print("onnx-asr is not installed: pip install -r requirements-common.txt", file=sys.stderr)
         return 1
 
-    # The flags override the config, but the revision stays pinned (asr/weights.py).
+    # The flags override the config; the revision follows the model on its own,
+    # out of the catalogue (asr/weights.py, asr/catalog.py).
     cfg.asr.parakeet_model = args.model
     cfg.asr.parakeet_quantization = args.quantization
 

@@ -24,6 +24,7 @@ import numpy as np
 from ..config import AudioConfig
 from ..domain import AudioChunk, Speaker
 from .capture import RingBuffer
+from .preprocess import create_highpass
 from .speech_events import SpeechEnd, SpeechEventSource, SpeechStart, create_stream_processor
 from .vad import SpeechDetector
 
@@ -261,6 +262,15 @@ class ChunkerThread(threading.Thread):
         self.cfg = cfg
         self.stop_event = stop_event
         self._last_dropped = 0
+        # The filter sits here rather than in ChannelCapture on purpose: the
+        # recording tap hangs off the capture callback, and the audio.wav next
+        # to the transcript has to stay what the room actually sounded like.
+        self._highpass = create_highpass(cfg.highpass_hz, cfg.sample_rate)
+        if self._highpass is not None:
+            log.info(
+                "Channel %s: high-pass at %.0f Hz (%d taps)",
+                speaker.value, cfg.highpass_hz, self._highpass.taps,
+            )
 
     def run(self) -> None:
         log.info("Chunker %s started", self.speaker.value)
@@ -284,7 +294,10 @@ class ChunkerThread(threading.Thread):
                 self.speaker.value, self.ring.dropped_samples - self._last_dropped,
             )
             self._last_dropped = self.ring.dropped_samples
-        for chunk in self.assembler.feed(self.ring.pop_all()):
+        audio = self.ring.pop_all()
+        if self._highpass is not None:
+            audio = self._highpass.process(audio)
+        for chunk in self.assembler.feed(audio):
             if self.out_queue.qsize() >= self.MAX_BACKLOG:
                 log.error(
                     "The ASR queue is full (%d) — chunk %s %.1f–%.1f s was dropped. "

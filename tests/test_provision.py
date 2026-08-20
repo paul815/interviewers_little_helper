@@ -14,6 +14,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
 
+from app import provision
+from app.asr.catalog import MODELS
 from app.audio import loopback
 from app.config import AppConfig
 from app.provision import Provisioner, asr_ready
@@ -51,6 +53,60 @@ def test_refresh_marks_llm_blocked_without_server():
 def test_refresh_marks_llm_missing_when_server_up():
     prov = make_provisioner(llm=FakeLLM(server_up=True, model_found=False))
     assert asyncio.run(prov.refresh())["items"]["llm"]["state"] == "missing"
+
+
+# ---------------------------------------------------- the model follows the language
+
+def test_refresh_sizes_the_model_the_language_needs(monkeypatch):
+    """Before the language selector this number was a constant, so a Russian
+    interview promised 670 MB and downloaded a different model entirely."""
+    monkeypatch.setattr(provision, "asr_ready", lambda repo: False)
+    prov = make_provisioner()
+
+    russian = asyncio.run(prov.refresh("ru"))["items"]["asr"]
+    european = asyncio.run(prov.refresh("de"))["items"]["asr"]
+
+    assert russian["message"] == f"about {MODELS['gigaam-v3-e2e-rnnt'].download_mb} MB"
+    assert european["message"] == f"about {MODELS['nemo-parakeet-tdt-0.6b-v3'].download_mb} MB"
+    assert russian["title"] != european["title"]
+
+
+def test_refresh_without_a_language_keeps_the_configured_model(monkeypatch):
+    monkeypatch.setattr(provision, "asr_ready", lambda repo: False)
+    prov = make_provisioner()
+    asyncio.run(prov.refresh())
+    assert prov._asr_cfg.parakeet_model == AppConfig().asr.parakeet_model
+
+
+def test_download_fetches_the_model_of_the_chosen_language(monkeypatch):
+    """The download must not race the refresh: whatever language `start` was
+    given is the model that ends up on disk."""
+    loaded = []
+    monkeypatch.setattr(provision, "asr_ready", lambda repo: False)
+    monkeypatch.setattr(
+        provision, "load_pinned_model", lambda cfg: loaded.append(cfg.parakeet_model)
+    )
+    prov = make_provisioner(llm=FakeLLM(model_found=True))
+
+    async def run():
+        await prov.refresh()          # screen was showing the default model
+        prov.start(["asr"], "ru")     # ...and the researcher then picked Russian
+        await prov._task
+
+    asyncio.run(run())
+    assert loaded == ["gigaam-v3-e2e-rnnt"]
+
+
+def test_language_options_report_readiness(monkeypatch):
+    monkeypatch.setattr(
+        provision, "asr_ready", lambda repo: repo == "istupakov/parakeet-tdt-0.6b-v3-onnx"
+    )
+    by_code = {o["code"]: o for o in provision.language_options()}
+
+    assert by_code["ru"]["model"] == "gigaam-v3-e2e-rnnt"
+    assert by_code["ru"]["ready"] is False
+    assert by_code["en"]["ready"] is True
+    assert by_code["ru"]["download_mb"] == MODELS["gigaam-v3-e2e-rnnt"].download_mb
 
 
 def test_refresh_marks_llm_ok_when_model_present():
